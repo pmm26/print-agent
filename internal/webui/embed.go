@@ -1,19 +1,20 @@
-// Package webui embeds the management dashboard (plain HTML/CSS/JS) into
-// the binary. Note: go:embed paths must live inside this package directory.
+// Package webui embeds the compiled React management dashboard into the binary.
+// Note: go:embed paths must live inside this package directory.
 package webui
 
 import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"strings"
 )
 
-//go:embed web
+//go:embed dist
 var webFiles embed.FS
 
 // Handler serves the embedded dashboard files.
 func Handler() http.Handler {
-	sub, err := fs.Sub(webFiles, "web")
+	sub, err := fs.Sub(webFiles, "dist")
 	if err != nil {
 		panic(err) // embedded tree is fixed at compile time
 	}
@@ -51,6 +52,12 @@ func Handler() http.Handler {
 				_, _ = w.Write(index)
 			}
 			return
+		}
+		if r.URL.Path == "/index.html" {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		if strings.HasPrefix(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		}
 		files.ServeHTTP(w, r)
 	})

@@ -215,6 +215,22 @@ go test ./...   # unit + integration (mock transports with scripted failures)
 go vet ./...
 ```
 
+The embedded admin dashboard is a React 19 + TypeScript application using
+Vite, React Router, TanStack Query, Tailwind CSS, and shadcn/Base UI. Its
+source lives in `internal/webui/frontend`; the production bundle in
+`internal/webui/dist` is committed so building the Go binary does not require
+Node.js.
+
+```sh
+cd internal/webui/frontend
+npm ci
+npm run dev      # Vite dev server; proxies /api/v1 to the running agent
+npm run check    # typecheck, lint, unit tests, and production build
+```
+
+After changing the dashboard, commit both the source and regenerated `dist`
+files. CI rebuilds the bundle and rejects stale generated assets.
+
 Architecture (one worker per printer, no shared locks on the print path):
 
 ```

@@ -20,6 +20,22 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-node@v4
+        if: runner.os == 'Linux'
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: internal/webui/frontend/package-lock.json
+      - name: Install dashboard dependencies
+        if: runner.os == 'Linux'
+        run: npm --prefix internal/webui/frontend ci
+      - name: Check and build dashboard
+        if: runner.os == 'Linux'
+        run: npm --prefix internal/webui/frontend run check
+      - name: Check committed dashboard bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: git diff --exit-code -- internal/webui/dist
       - name: Check formatting
         if: runner.os == 'Linux'
         shell: bash
@@ -31,14 +47,6 @@ jobs:
       - name: Race test
         if: runner.os == 'Linux'
         run: go test -race ./...
-      - uses: actions/setup-node@v4
-        if: runner.os == 'Linux'
-        with:
-          node-version: 24
-      - name: Check dashboard JavaScript
-        if: runner.os == 'Linux'
-        run: node --check internal/webui/web/app.js
-
   vulnerabilities:
     runs-on: ubuntu-latest
     steps:
