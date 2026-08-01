@@ -15,7 +15,7 @@ type TransportKind string
 
 const (
 	// TransportBluetoothSerial sends bytes over the platform's Bluetooth
-	// printer channel: SPP serial on macOS/Windows and SPP or BLE GATT on Linux.
+	// printer channel exposed by the active platform driver.
 	TransportBluetoothSerial TransportKind = "bluetooth-serial"
 	// TransportMock is an in-process fake printer used for development
 	// and integration tests. It records bytes instead of printing.

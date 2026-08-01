@@ -339,12 +339,16 @@ async function refreshBluetoothDevices() {
     ]);
     knownPrinters = printerStatuses || [];
     if (!result.supported) {
-      $("#scan-status").textContent = "In-app pairing is available on Linux. Use your operating system Bluetooth settings here.";
+      $("#scan-status").textContent = "Use your operating system Bluetooth settings to pair printers, then add the discovered endpoint under Printers.";
       $("#btn-scan").disabled = true;
       $("#btn-stop-scan").disabled = true;
-      root.innerHTML = `<div class="card"><button id="btn-pair-open-bt">Open Bluetooth settings</button></div>`;
+      root.innerHTML = `<div class="card"><button id="btn-pair-open-bt">Open Bluetooth settings</button> <button id="btn-pair-add-printer">Add printer</button></div>`;
       $("#btn-pair-open-bt").addEventListener("click", () =>
         call(() => api("/system/open-bluetooth-settings", { method: "POST" })));
+      $("#btn-pair-add-printer").addEventListener("click", () => {
+        activateTab("printers");
+        openDialog(null);
+      });
       return false;
     }
     renderBluetoothDevices(result.devices || []);

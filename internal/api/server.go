@@ -231,6 +231,6 @@ func (s *Server) writeBluetoothError(w http.ResponseWriter, address string, err 
 	case errors.Is(err, platform.ErrBluetoothUnavailable):
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Code: "bluetooth_unavailable", Error: "Bluetooth is unavailable; check that the adapter is powered on"})
 	default:
-		writeJSON(w, http.StatusBadGateway, errorResponse{Code: "bluetooth_error", Error: "BlueZ could not pair the device; check the agent log for details"})
+		writeJSON(w, http.StatusBadGateway, errorResponse{Code: "bluetooth_error", Error: "Bluetooth pairing failed; check the agent log for details"})
 	}
 }

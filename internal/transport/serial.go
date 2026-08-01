@@ -23,8 +23,8 @@ const (
 )
 
 // SerialTransport talks to a printer through an OS serial endpoint
-// (Windows COM port and macOS /dev/cu.*). Linux owns Bluetooth sockets
-// directly through BlueZ rather than relying on legacy /dev/rfcomm nodes.
+// (Windows COM port and macOS /dev/cu.*). Platforms that own Bluetooth
+// sockets directly can substitute their own transport.
 //
 // go.bug.st/serial exposes no portable write deadline, so writes run in a
 // goroutine guarded by a watchdog: on timeout the port is closed, which

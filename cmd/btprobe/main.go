@@ -208,8 +208,7 @@ func cmdMulti(ctx context.Context, args []string) error {
 
 // cmdStatus probes DLE EOT n (real-time status) for n=1..4 and reports
 // whether the printer answers. It is limited to serial device paths because
-// the agent transport is deliberately write-only; in particular, a Linux
-// rfcomm:// endpoint receives its socket from BlueZ and cannot be opened by
+// some platform transports are deliberately write-only and cannot be opened by
 // the serial library.
 func cmdStatus(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
