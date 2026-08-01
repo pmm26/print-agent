@@ -3,6 +3,7 @@ package escpos
 import (
 	"fmt"
 	"strings"
+	"unicode"
 
 	"golang.org/x/text/encoding"
 	"golang.org/x/text/encoding/charmap"
@@ -47,6 +48,10 @@ func encodeText(cp codePage, s string) []byte {
 	out := make([]byte, 0, len(s))
 	buf := make([]byte, 4)
 	for _, r := range s {
+		if unicode.IsControl(r) {
+			out = append(out, '?')
+			continue
+		}
 		nDst, _, err := enc.Transform(buf, []byte(string(r)), true)
 		enc.Reset()
 		if err != nil || nDst == 0 {

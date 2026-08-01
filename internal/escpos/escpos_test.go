@@ -3,6 +3,7 @@ package escpos
 import (
 	"bytes"
 	"encoding/json"
+	"math"
 	"strings"
 	"testing"
 
@@ -80,9 +81,30 @@ func TestTwoColumnsWidth(t *testing.T) {
 	}
 }
 
+func TestTwoColumnsUsesEffectiveDoubleWidth(t *testing.T) {
+	b, err := NewBuilder("CP858", 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.DoubleSize(true).TwoColumns("TOTAL", "123.45 EUR")
+	line, _, ok := bytes.Cut(b.Bytes()[3:], []byte{'\n'})
+	if !ok {
+		t.Fatal("no line terminator")
+	}
+	if len(line) > 16 {
+		t.Fatalf("double-width line has %d characters, want <= 16: %q", len(line), line)
+	}
+}
+
+func TestMoneyHandlesMinInt64(t *testing.T) {
+	if got := money(math.MinInt64, "EUR"); got != "-92233720368547758.08 EUR" {
+		t.Fatalf("money(MinInt64) = %q", got)
+	}
+}
+
 func TestRenderTemplatesProduceValidDocs(t *testing.T) {
 	r := NewRenderer()
-	data, _ := json.Marshal(map[string]any{
+	receipt, _ := json.Marshal(map[string]any{
 		"orderNumber": "1256",
 		"storeName":   "Café Ñandú",
 		"items": []map[string]any{
@@ -91,7 +113,18 @@ func TestRenderTemplatesProduceValidDocs(t *testing.T) {
 		"totalCents":    2500,
 		"paymentMethod": "cash",
 	})
+	station, _ := json.Marshal(map[string]any{
+		"orderNumber": "1256",
+		"items":       []map[string]any{{"name": "Tortilla española", "quantity": 2, "notes": "sin cebolla"}},
+	})
 	for _, tmpl := range TemplateNames() {
+		data := json.RawMessage(`{"line":"test"}`)
+		if tmpl == TemplateCustomerReceipt {
+			data = receipt
+		}
+		if tmpl == TemplateKitchenTicket || tmpl == TemplateBarTicket {
+			data = station
+		}
 		doc, err := r.Render(tmpl, data, testPrinter(), RenderOptions{})
 		if err != nil {
 			t.Fatalf("render %s: %v", tmpl, err)
@@ -107,13 +140,26 @@ func TestRenderTemplatesProduceValidDocs(t *testing.T) {
 
 func TestReprintMarker(t *testing.T) {
 	r := NewRenderer()
-	data, _ := json.Marshal(map[string]any{"orderNumber": "9", "items": []any{}})
+	data, _ := json.Marshal(map[string]any{"orderNumber": "9", "items": []any{map[string]any{"name": "Water", "quantity": 1}}})
 	doc, err := r.Render(TemplateKitchenTicket, data, testPrinter(), RenderOptions{Reprint: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(doc, []byte("*** REPRINT ***")) {
 		t.Error("reprint marker missing")
+	}
+}
+
+func TestTextControlBytesAreSanitized(t *testing.T) {
+	cp, err := lookupCodePage("CP858")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := encodeText(cp, "safe\x00\x1b\x1d\x10text")
+	for _, control := range []byte{0x00, 0x1b, 0x1d, 0x10} {
+		if bytes.Contains(got, []byte{control}) {
+			t.Fatalf("encoded text contains control byte %#x", control)
+		}
 	}
 }
 

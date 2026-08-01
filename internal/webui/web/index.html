@@ -4,50 +4,114 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Print Agent</title>
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="/admin/styles.css">
 </head>
 <body>
 <header>
   <h1>🖨 Print Agent <span id="agent-state" class="badge">…</span></h1>
-  <nav>
-    <button data-tab="printers" class="tab active">Printers</button>
-    <button data-tab="queue" class="tab">Queue</button>
-    <button data-tab="pairing" class="tab">POS Pairing</button>
-    <button data-tab="diagnostics" class="tab">Diagnostics</button>
-    <button data-tab="logs" class="tab">Logs</button>
+  <nav id="dashboard-nav" class="dashboard-nav" aria-label="Dashboard sections">
+    <details class="nav-menu" data-category="setup">
+      <summary>Setup</summary>
+      <div class="nav-dropdown">
+        <a href="/admin/setup/pair" data-route>Pair devices</a>
+        <a href="/admin/setup/printers" data-route>Printers</a>
+        <a href="/admin/setup/pos" data-route>POS Pairing</a>
+      </div>
+    </details>
+    <details class="nav-menu active" data-category="operations">
+      <summary>Operations</summary>
+      <div class="nav-dropdown">
+        <a href="/admin/operations/jobs" data-route aria-current="page">Jobs</a>
+        <a href="/admin/operations/queue" data-route>Queue</a>
+      </div>
+    </details>
+    <details class="nav-menu" data-category="system">
+      <summary>System</summary>
+      <div class="nav-dropdown">
+        <a href="/admin/system/diagnostics" data-route>Diagnostics</a>
+        <a href="/admin/system/logs" data-route>Logs</a>
+      </div>
+    </details>
+    <details class="nav-menu" data-category="dev">
+      <summary>Dev</summary>
+      <div class="nav-dropdown">
+        <a href="/admin/dev/pos-simulator" data-route>POS Simulator</a>
+      </div>
+    </details>
   </nav>
 </header>
 
 <main>
-  <section id="tab-printers" class="panel">
-    <div class="toolbar">
-      <button id="btn-add">＋ Add printer</button>
-      <button id="btn-reconnect-all">Reconnect all</button>
-      <button id="btn-open-bt">Open Bluetooth settings</button>
+  <div id="persistence-alert" class="system-alert hidden" role="alert"></div>
+  <section id="tab-jobs" class="panel">
+    <div class="page-heading">
+      <div>
+        <h2>Jobs</h2>
+        <p class="muted">One row per external job ID and template.</p>
+      </div>
+      <div class="toolbar">
+        <input id="jobs-filter" placeholder="External job ID">
+        <button id="btn-jobs-refresh">Refresh</button>
+      </div>
+    </div>
+    <table id="jobs-table">
+      <thead><tr><th>Job</th><th>Template</th><th>Created</th><th>State</th><th>Fulfilled</th><th>Flags</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="tab-bluetooth" class="panel hidden">
+    <div class="page-heading">
+      <div>
+        <h2>Pair Bluetooth devices</h2>
+        <p class="muted">Scan for nearby devices, then pair each printer you want to use. You can pair more than one.</p>
+      </div>
+      <div class="toolbar">
+        <button id="btn-scan" class="primary">Scan for devices</button>
+        <button id="btn-stop-scan" disabled>Stop scan</button>
+      </div>
+    </div>
+    <div id="scan-status" class="scan-status muted">Checking Bluetooth…</div>
+    <div id="device-list"></div>
+  </section>
+
+  <section id="tab-printers" class="panel hidden">
+    <div class="page-heading">
+      <div><h2>Printers</h2><p class="muted">Configure printer identities, connections, and rendering profiles.</p></div>
+      <div class="toolbar">
+        <button id="btn-add">＋ Add printer</button>
+        <button id="btn-reconnect-all">Reconnect all</button>
+        <button id="btn-open-bt">Open Bluetooth settings</button>
+      </div>
     </div>
     <div id="printer-list"></div>
   </section>
 
   <section id="tab-queue" class="panel hidden">
-    <div class="toolbar">
-      <select id="queue-filter">
-        <option value="">All statuses</option>
-        <option value="queued">queued</option>
-        <option value="processing">processing</option>
-        <option value="transmitted">transmitted</option>
-        <option value="failed">failed</option>
-        <option value="uncertain">uncertain</option>
-        <option value="cancelled">cancelled</option>
-      </select>
-      <button id="btn-queue-refresh">Refresh</button>
+    <div class="page-heading">
+      <div><h2>Queue</h2><p class="muted">Print Runs grouped by printer, status, and execution order.</p></div>
+      <div class="toolbar">
+        <select id="queue-printer"><option value="">All printers</option></select>
+        <select id="queue-filter">
+          <option value="">All statuses</option>
+          <option value="queued">queued</option>
+          <option value="processing">processing</option>
+          <option value="transmitted">transmitted</option>
+          <option value="failed">failed</option>
+          <option value="uncertain">uncertain</option>
+          <option value="cancelled">cancelled</option>
+        </select>
+        <button id="btn-queue-refresh">Refresh</button>
+      </div>
     </div>
     <table id="queue-table">
-      <thead><tr><th>Delivery</th><th>Printer</th><th>Template</th><th>Status</th><th>Attempts</th><th>Error</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Print Run</th><th>Job</th><th>Printer</th><th>#</th><th>Trigger</th><th>Status</th><th>Error</th><th>Actions</th></tr></thead>
       <tbody></tbody>
     </table>
   </section>
 
   <section id="tab-pairing" class="panel hidden">
+    <div class="page-heading"><div><h2>POS Pairing</h2><p class="muted">Authorize a hosted POS origin to submit Jobs to this agent.</p></div></div>
     <div class="card">
       <h2>Allowed POS origin</h2>
       <p class="muted">Exact origin of the hosted POS page, e.g. <code>https://pos.example.com</code></p>
@@ -72,26 +136,113 @@
   </section>
 
   <section id="tab-diagnostics" class="panel hidden">
-    <div class="toolbar">
-      <button id="btn-diag-refresh">Refresh</button>
-      <a href="/api/v1/diagnostics/export"><button>Export diagnostics (.zip)</button></a>
+    <div class="page-heading">
+      <div><h2>Diagnostics</h2><p class="muted">Agent, database, platform, and printer troubleshooting information.</p></div>
+      <div class="toolbar">
+        <button id="btn-diag-refresh">Refresh</button>
+        <a href="/api/v1/diagnostics/export"><button>Export diagnostics (.zip)</button></a>
+      </div>
     </div>
     <pre id="diag-body">…</pre>
   </section>
 
   <section id="tab-logs" class="panel hidden">
-    <div class="toolbar"><button id="btn-logs-refresh">Refresh</button></div>
+    <div class="page-heading">
+      <div><h2>Logs</h2><p class="muted">Recent operational and Print Run events.</p></div>
+      <div class="toolbar"><button id="btn-logs-refresh">Refresh</button></div>
+    </div>
     <table id="log-table">
-      <thead><tr><th>Time</th><th>Event</th><th>Printer</th><th>Delivery</th><th>Message</th></tr></thead>
+      <thead><tr><th>Time</th><th>Event</th><th>Printer</th><th>Print Run</th><th>Message</th></tr></thead>
       <tbody></tbody>
     </table>
+  </section>
+
+  <section id="tab-dev" class="panel hidden">
+    <div class="page-heading">
+      <div>
+        <h2>POS Simulator</h2>
+        <p class="muted">Create and exercise real <code>kitchen-ticket</code> jobs from the local dashboard.</p>
+      </div>
+      <span class="badge dev">Development tool</span>
+    </div>
+
+    <div class="system-alert dev-warning" role="alert">
+      Submitting jobs and reprints can produce physical tickets. Verify the selected printers before continuing.
+    </div>
+
+    <div class="card">
+      <h2>Create kitchen ticket</h2>
+      <div id="dev-printer-list" class="dev-printer-grid">
+        <span class="muted">Loading configured printers…</span>
+      </div>
+      <label class="dev-field">Job ID
+        <div class="row">
+          <input id="dev-job-id" maxlength="200">
+          <button id="btn-dev-new-job-id">Generate new</button>
+        </div>
+      </label>
+      <label class="dev-field">Ticket data (JSON)
+        <textarea id="dev-job-data" rows="14" spellcheck="false"></textarea>
+      </label>
+      <div class="toolbar dev-toolbar">
+        <button id="btn-dev-reset">Reset sample</button>
+        <button id="btn-dev-submit" class="primary">Submit and print</button>
+        <button id="btn-dev-duplicate" disabled>Resubmit exact request</button>
+        <button id="btn-dev-conflict" disabled>Test changed-data conflict</button>
+      </div>
+      <div id="dev-submit-status" class="muted"></div>
+    </div>
+
+    <div id="dev-job-card" class="card hidden">
+      <div class="page-heading">
+        <div>
+          <h2>Active test job</h2>
+          <p id="dev-job-summary" class="muted"></p>
+        </div>
+        <div class="row">
+          <button id="btn-dev-refresh-job">Refresh</button>
+          <button id="btn-dev-open-job">Open full job controls</button>
+        </div>
+      </div>
+      <div id="dev-job-detail"></div>
+
+      <div class="dev-reprint-panel">
+        <h2>Reprint selected targets</h2>
+        <div class="dev-form-grid">
+          <label>Reason (optional)
+            <input id="dev-reprint-reason" maxlength="500" placeholder="Ticket damaged">
+          </label>
+          <label>Reprint request ID
+            <div class="row">
+              <input id="dev-reprint-id" maxlength="250">
+              <button id="btn-dev-new-reprint-id">Generate new</button>
+            </div>
+          </label>
+        </div>
+        <div class="toolbar dev-toolbar">
+          <button id="btn-dev-reprint" class="primary">Create reprint</button>
+          <button id="btn-dev-repeat-reprint" disabled>Resubmit exact reprint</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="page-heading">
+        <div>
+          <h2>Last API result</h2>
+          <p class="muted">Kept in memory only and cleared when the dashboard reloads.</p>
+        </div>
+        <button id="btn-dev-clear-result">Clear</button>
+      </div>
+      <pre id="dev-result">No requests yet.</pre>
+    </div>
   </section>
 </main>
 
 <dialog id="printer-dialog">
   <form id="printer-form" method="dialog">
     <h2 id="dialog-title">Add printer</h2>
-    <p class="muted">Pair the printer in the operating system's Bluetooth settings first, then pick its endpoint below.</p>
+    <p class="muted">Pick a paired Bluetooth device, then give this printer a stable name for print jobs.</p>
     <label>Endpoint
       <div class="row">
         <select id="f-endpoint"></select>
@@ -113,7 +264,15 @@
   </form>
 </dialog>
 
+<dialog id="job-dialog">
+  <div class="page-heading">
+    <h2 id="job-dialog-title">Job</h2>
+    <button id="btn-job-close">Close</button>
+  </div>
+  <div id="job-detail"></div>
+</dialog>
+
 <div id="toast" class="hidden"></div>
-<script src="app.js"></script>
+<script src="/admin/app.js"></script>
 </body>
 </html>

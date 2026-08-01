@@ -15,12 +15,13 @@ const (
 	PrinterReconnecting = "printer.reconnecting"
 	PrinterError        = "printer.error"
 	JobAccepted         = "job.accepted"
-	DeliveryQueued      = "delivery.queued"
-	DeliveryProcessing  = "delivery.processing"
-	DeliveryTransmitted = "delivery.transmitted"
-	DeliveryFailed      = "delivery.failed"
-	DeliveryUncertain   = "delivery.uncertain"
-	DeliveryCancelled   = "delivery.cancelled"
+	PrintRunQueued      = "print_run.queued"
+	PrintRunProcessing  = "print_run.processing"
+	PrintRunTransmitted = "print_run.transmitted"
+	PrintRunFailed      = "print_run.failed"
+	PrintRunUncertain   = "print_run.uncertain"
+	PrintRunCancelled   = "print_run.cancelled"
+	PrintRunResolved    = "print_run.resolved"
 	ConfigChanged       = "config.changed"
 	AuthDenied          = "auth.denied"
 	AgentStarted        = "agent.started"
@@ -28,11 +29,11 @@ const (
 )
 
 type Event struct {
-	Type       string    `json:"type"`
-	PrinterID  string    `json:"printerId,omitempty"`
-	DeliveryID string    `json:"deliveryId,omitempty"`
-	Message    string    `json:"message,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
+	Type      string    `json:"type"`
+	PrinterID string    `json:"printerId,omitempty"`
+	RunUID    string    `json:"runUid,omitempty"`
+	Message   string    `json:"message,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 type Bus struct {

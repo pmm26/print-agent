@@ -49,13 +49,13 @@ func (m *MockTransport) Write(ctx context.Context, data []byte) error {
 	m.mu.Lock()
 	if !m.connected {
 		m.mu.Unlock()
-		return &WriteError{Err: errors.New("mock: not connected")}
+		return &WriteError{Outcome: WriteNotSent, Err: errors.New("mock: not connected")}
 	}
 	if m.HangOnWrite {
 		m.mu.Unlock()
 		<-ctx.Done()
 		m.Close()
-		return &WriteError{BytesWritten: 0, Err: ErrWriteTimeout}
+		return &WriteError{BytesWritten: 0, Outcome: WriteAmbiguous, Err: ErrWriteTimeout}
 	}
 	if m.FailWrite != nil {
 		n := min(m.FailAfter, len(data))
@@ -66,7 +66,11 @@ func (m *MockTransport) Write(ctx context.Context, data []byte) error {
 		}
 		m.connected = false
 		m.mu.Unlock()
-		return &WriteError{BytesWritten: n, Err: err}
+		outcome := WriteNotSent
+		if n > 0 || errors.Is(err, ErrWriteTimeout) || errors.Is(err, context.Canceled) {
+			outcome = WriteAmbiguous
+		}
+		return &WriteError{BytesWritten: n, Outcome: outcome, Err: err}
 	}
 	m.writes = append(m.writes, append([]byte(nil), data...))
 	hook := m.OnWrite
@@ -84,6 +88,21 @@ func (m *MockTransport) FailNextWrite(err error, afterBytes int) {
 	m.FailWrite = err
 	m.FailAfter = afterBytes
 	m.failWriteOnce = true
+}
+
+// SetConnectFailure safely changes the scripted connection failure while a
+// worker may be reconnecting concurrently.
+func (m *MockTransport) SetConnectFailure(err error) {
+	m.mu.Lock()
+	m.FailConnect = err
+	m.mu.Unlock()
+}
+
+// SetOnWrite safely installs a hook used by integration tests.
+func (m *MockTransport) SetOnWrite(hook func([]byte)) {
+	m.mu.Lock()
+	m.OnWrite = hook
+	m.mu.Unlock()
 }
 
 func (m *MockTransport) Probe(ctx context.Context) error { return ErrUnsupported }

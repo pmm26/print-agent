@@ -33,6 +33,7 @@ type Driver struct {
 	mu       sync.Mutex
 	cached   []pairedDevice
 	cachedAt time.Time
+	cacheErr error
 }
 
 func New() *Driver { return &Driver{} }
@@ -47,14 +48,14 @@ func (d *Driver) NewTransport(cfg config.PrinterConfig) transport.Transport {
 // deviceCacheTTL bounds how stale the paired-device snapshot may be.
 const deviceCacheTTL = 3 * time.Second
 
-func (d *Driver) devices(ctx context.Context) []pairedDevice {
+func (d *Driver) devices(ctx context.Context) ([]pairedDevice, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if time.Since(d.cachedAt) > deviceCacheTTL {
-		d.cached = pairedDevices(ctx)
+		d.cached, d.cacheErr = pairedDevices(ctx)
 		d.cachedAt = time.Now()
 	}
-	return d.cached
+	return d.cached, d.cacheErr
 }
 
 // VerifyConnected reports platform.ErrNotConnected only when the paired
@@ -62,18 +63,33 @@ func (d *Driver) devices(ctx context.Context) []pairedDevice {
 // stored and no name correlation) verify as connected — better optimistic
 // than flapping.
 func (d *Driver) VerifyConnected(ctx context.Context, cfg config.PrinterConfig) error {
+	state, err := d.LinkState(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if state != platform.LinkConnected {
+		return platform.ErrNotConnected
+	}
+	return nil
+}
+
+func (d *Driver) LinkState(ctx context.Context, cfg config.PrinterConfig) (platform.LinkState, error) {
 	nodeName := strings.TrimPrefix(filepath.Base(cfg.Endpoint), "cu.")
-	for _, dev := range d.devices(ctx) {
+	devices, err := d.devices(ctx)
+	if err != nil {
+		return platform.LinkUnknown, err
+	}
+	for _, dev := range devices {
 		match := (cfg.DeviceAddress != "" && strings.EqualFold(dev.address, cfg.DeviceAddress)) ||
 			matchesDeviceName(dev.name, nodeName)
 		if match {
 			if dev.connected {
-				return nil
+				return platform.LinkConnected, nil
 			}
-			return platform.ErrNotConnected
+			return platform.LinkDisconnected, nil
 		}
 	}
-	return nil // device not in the paired list: state unknowable
+	return platform.LinkUnknown, nil
 }
 
 func (d *Driver) EnsureConnected(ctx context.Context, cfg config.PrinterConfig) (string, error) {
@@ -108,7 +124,10 @@ func (d *Driver) ListCandidates(ctx context.Context) ([]platform.Candidate, erro
 	if err != nil {
 		return nil, err
 	}
-	paired := d.devices(ctx)
+	paired, pairErr := d.devices(ctx)
+	if pairErr != nil {
+		return nil, pairErr
+	}
 	var out []platform.Candidate
 	for _, dev := range devs {
 		name := strings.TrimPrefix(filepath.Base(dev), "cu.")
@@ -144,11 +163,11 @@ type pairedDevice struct {
 }
 
 // pairedDevices reads paired Bluetooth devices via system_profiler. Failures
-// degrade gracefully: candidates simply lose their name/MAC annotations.
-func pairedDevices(ctx context.Context) []pairedDevice {
+// propagate so callers classify the link as unknown rather than connected.
+func pairedDevices(ctx context.Context) ([]pairedDevice, error) {
 	out, err := exec.CommandContext(ctx, "system_profiler", "SPBluetoothDataType", "-json").Output()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	// system_profiler JSON shape:
 	// {"SPBluetoothDataType":[{"device_connected":[{"Name":{...fields}}],
@@ -157,7 +176,7 @@ func pairedDevices(ctx context.Context) []pairedDevice {
 		SPBluetoothDataType []map[string]json.RawMessage `json:"SPBluetoothDataType"`
 	}
 	if err := json.Unmarshal(out, &doc); err != nil {
-		return nil
+		return nil, err
 	}
 	var devices []pairedDevice
 	for _, section := range doc.SPBluetoothDataType {
@@ -188,7 +207,7 @@ func pairedDevices(ctx context.Context) []pairedDevice {
 			}
 		}
 	}
-	return devices
+	return devices, nil
 }
 
 // matchesDeviceName reports whether a paired Bluetooth device name maps to

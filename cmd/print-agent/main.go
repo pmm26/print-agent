@@ -18,22 +18,30 @@ func main() {
 	port := flag.Int("port", 17432, "loopback port to listen on")
 	dataDir := flag.String("data-dir", "", "data directory (default: OS config dir /print-agent)")
 	console := flag.Bool("console", true, "log to stderr in addition to the log file")
-	retention := flag.Int("retention-days", 30, "days to keep finished jobs and events")
 	flag.Parse()
 
 	svc, err := app.New(app.Options{
-		DataDir:       *dataDir,
-		Port:          *port,
-		Console:       *console,
-		RetentionDays: *retention,
+		DataDir: *dataDir,
+		Port:    *port,
+		Console: *console,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	go func() {
+		<-signals
+		cancel()
+		<-signals
+		fmt.Fprintln(os.Stderr, "second signal received; forcing shutdown")
+		os.Exit(2)
+	}()
 	if err := svc.Run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)

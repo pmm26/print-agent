@@ -58,10 +58,11 @@ $("#origin").textContent = location.origin;
 const tokenKey = "print-agent-token";
 $("#token-display").textContent = localStorage.getItem(tokenKey) ? "(stored)" : "none";
 
-let lastJobId = null;
+let lastSubmission = null;
 const log = (label, data, isErr) => {
-  $("#log").innerHTML = `<span class="${isErr ? "err" : "ok"}">${label}</span>\n` +
-    (typeof data === "string" ? data : JSON.stringify(data, null, 2));
+	const output = $("#log");
+	output.textContent = `${label}\n${typeof data === "string" ? data : JSON.stringify(data, null, 2)}`;
+	output.className = isErr ? "err" : "ok";
 };
 
 async function agentFetch(path, opts = {}) {
@@ -78,9 +79,11 @@ async function agentFetch(path, opts = {}) {
 $("#btn-health").onclick = async () => {
   try {
     await agentFetch("/api/v1/health");
-    $("#health-result").innerHTML = '<span class="ok">reachable ✓</span>';
-  } catch (e) {
-    $("#health-result").innerHTML = `<span class="err">${e.message}</span>`;
+		$("#health-result").textContent = "reachable ✓";
+		$("#health-result").className = "ok";
+	} catch (e) {
+		$("#health-result").textContent = e.message;
+		$("#health-result").className = "err";
   }
 };
 
@@ -100,11 +103,9 @@ function buildJob(orderNo, printerId) {
   const jobId = `pos-sim:order-${orderNo}`;
   return {
     jobId,
-    documents: [{
-      deliveryId: `${jobId}:${printerId}`,
-      printerId,
-      template: "customer-receipt",
-      data: {
+    template: "customer-receipt",
+    printerIds: [printerId],
+    data: {
         storeName: "POS Simulator",
         orderNumber: String(orderNo),
         createdAt: new Date().toISOString(),
@@ -114,8 +115,7 @@ function buildJob(orderNo, printerId) {
         ],
         totalCents: 2680,
         paymentMethod: "cash",
-      },
-    }],
+    },
   };
 }
 
@@ -123,7 +123,6 @@ async function submit(job) {
   try {
     const res = await agentFetch("/api/v1/jobs", {
       method: "POST",
-      headers: { "Idempotency-Key": job.jobId },
       body: JSON.stringify(job),
     });
     log(res.duplicate ? "duplicate — not reprinted" : "accepted", res);
@@ -131,13 +130,13 @@ async function submit(job) {
 }
 
 $("#btn-print").onclick = () => {
-  const job = buildJob($("#order-no").value, $("#printer-id").value);
-  lastJobId = job.jobId;
-  submit(job);
+	const job = buildJob($("#order-no").value, $("#printer-id").value);
+	lastSubmission = { job };
+	submit(lastSubmission.job);
 };
 $("#btn-print-dup").onclick = () => {
-  if (!lastJobId) return log("no job sent yet", "", true);
-  submit(buildJob($("#order-no").value, $("#printer-id").value));
+	if (!lastSubmission) return log("no job sent yet", "", true);
+	submit(lastSubmission.job);
 };
 $("#btn-status").onclick = async () => {
   try { log("status", await agentFetch("/api/v1/status")); }

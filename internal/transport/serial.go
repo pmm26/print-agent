@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -22,7 +23,8 @@ const (
 )
 
 // SerialTransport talks to a printer through an OS serial endpoint
-// (Windows COM port, macOS /dev/cu.*, Linux /dev/rfcomm*).
+// (Windows COM port and macOS /dev/cu.*). Linux owns Bluetooth sockets
+// directly through BlueZ rather than relying on legacy /dev/rfcomm nodes.
 //
 // go.bug.st/serial exposes no portable write deadline, so writes run in a
 // goroutine guarded by a watchdog: on timeout the port is closed, which
@@ -107,7 +109,7 @@ func (t *SerialTransport) Write(ctx context.Context, data []byte) error {
 	port := t.port
 	t.mu.Unlock()
 	if port == nil {
-		return &WriteError{BytesWritten: 0, Err: fmt.Errorf("%s: not connected", t.cfg.Endpoint)}
+		return &WriteError{BytesWritten: 0, Outcome: WriteNotSent, Err: fmt.Errorf("%s: not connected", t.cfg.Endpoint)}
 	}
 
 	written := 0
@@ -117,7 +119,11 @@ func (t *SerialTransport) Write(ctx context.Context, data []byte) error {
 		written += n
 		if err != nil {
 			t.Close()
-			return &WriteError{BytesWritten: written, Err: err}
+			outcome := WriteNotSent
+			if written > 0 || errors.Is(err, ErrWriteTimeout) || errors.Is(err, context.Canceled) {
+				outcome = WriteAmbiguous
+			}
+			return &WriteError{BytesWritten: written, Outcome: outcome, Err: err}
 		}
 	}
 	return nil
@@ -150,12 +156,19 @@ func (t *SerialTransport) writeChunk(ctx context.Context, port serial.Port, chun
 		return res.n, nil
 	case <-timer.C:
 		port.Close() // unblocks the writer
-		<-ch         // reap it
+		boundedReap(ch)
 		return 0, ErrWriteTimeout
 	case <-ctx.Done():
 		port.Close()
-		<-ch
+		boundedReap(ch)
 		return 0, ctx.Err()
+	}
+}
+
+func boundedReap[T any](ch <-chan T) {
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
 	}
 }
 

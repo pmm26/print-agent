@@ -15,12 +15,12 @@ import (
 var Version = "dev"
 
 type EventRow struct {
-	ID         int64  `json:"id"`
-	DeliveryID string `json:"deliveryId,omitempty"`
-	PrinterID  string `json:"printerId,omitempty"`
-	Type       string `json:"type"`
-	Message    string `json:"message,omitempty"`
-	CreatedAt  string `json:"createdAt"`
+	ID        int64  `json:"id"`
+	RunUID    string `json:"runUid,omitempty"`
+	PrinterID string `json:"printerId,omitempty"`
+	Type      string `json:"type"`
+	Message   string `json:"message,omitempty"`
+	CreatedAt string `json:"createdAt"`
 }
 
 type Service struct {
@@ -34,11 +34,12 @@ func NewService(db *sql.DB, dbPath string) *Service {
 }
 
 // PersistEvent stores one bus event; wired as an event-bus subscriber.
-func (s *Service) PersistEvent(eventType, printerID, deliveryID, message string, at time.Time) {
-	s.db.Exec(`INSERT INTO print_events (delivery_id, printer_id, event_type, message, created_at)
+func (s *Service) PersistEvent(eventType, printerID, runUID, message string, at time.Time) error {
+	_, err := s.db.Exec(`INSERT INTO print_events (run_uid, printer_id, event_type, message, created_at)
 		VALUES (?, ?, ?, ?, ?)`,
-		nullable(deliveryID), nullable(printerID), eventType, nullable(message),
+		nullable(runUID), nullable(printerID), eventType, nullable(message),
 		at.UTC().Format(time.RFC3339Nano))
+	return err
 }
 
 func nullable(s string) any {
@@ -53,7 +54,7 @@ func (s *Service) RecentEvents(limit int) ([]EventRow, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`SELECT id, COALESCE(delivery_id, ''), COALESCE(printer_id, ''),
+	rows, err := s.db.Query(`SELECT id, COALESCE(run_uid, ''), COALESCE(printer_id, ''),
 		event_type, COALESCE(message, ''), created_at
 		FROM print_events ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
@@ -63,7 +64,7 @@ func (s *Service) RecentEvents(limit int) ([]EventRow, error) {
 	var out []EventRow
 	for rows.Next() {
 		var e EventRow
-		if err := rows.Scan(&e.ID, &e.DeliveryID, &e.PrinterID, &e.Type, &e.Message, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.RunUID, &e.PrinterID, &e.Type, &e.Message, &e.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -115,10 +116,11 @@ func (s *Service) WriteExportZip(w io.Writer, extras map[string]any) error {
 		return err
 	}
 	events, err := s.RecentEvents(1000)
-	if err == nil {
-		if err := writeJSON("events.json", events); err != nil {
-			return err
-		}
+	if err != nil {
+		return err
+	}
+	if err := writeJSON("events.json", events); err != nil {
+		return err
 	}
 	for name, v := range extras {
 		if err := writeJSON(name, v); err != nil {

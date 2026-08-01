@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,7 @@ type fakePort struct {
 	writeStarted chan struct{}
 	unblock      chan struct{}
 	closed       chan struct{}
+	closeOnce    sync.Once
 }
 
 func (f *fakePort) Write(p []byte) (int, error) {
@@ -27,8 +29,10 @@ func (f *fakePort) Write(p []byte) (int, error) {
 }
 
 func (f *fakePort) Close() error {
-	close(f.closed)
-	close(f.unblock)
+	f.closeOnce.Do(func() {
+		close(f.closed)
+		close(f.unblock)
+	})
 	return nil
 }
 
@@ -80,5 +84,18 @@ func TestWriteReportsBytesWritten(t *testing.T) {
 	}
 	if werr.BytesWritten != 3 {
 		t.Errorf("BytesWritten = %d, want 3", werr.BytesWritten)
+	}
+}
+
+func TestSerialCancellationIsAmbiguous(t *testing.T) {
+	tr := NewSerial(config.PrinterConfig{Endpoint: "fake"})
+	port := &fakePort{writeStarted: make(chan struct{}), unblock: make(chan struct{}), closed: make(chan struct{})}
+	tr.port = port
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { <-port.writeStarted; cancel() }()
+	err := tr.Write(ctx, []byte("ticket"))
+	var writeErr *WriteError
+	if !errors.As(err, &writeErr) || !writeErr.Ambiguous() {
+		t.Fatalf("Write = %#v, want ambiguous WriteError", err)
 	}
 }

@@ -1,7 +1,7 @@
 // btprobe is the Phase 0 hardware validation harness. It exercises paired
 // Bluetooth ESC/POS printers directly, before any agent code is trusted:
 //
-//	btprobe list                     enumerate candidate serial endpoints
+//	btprobe list                     enumerate candidate printer endpoints
 //	btprobe test <endpoint>          print a formatted test page
 //	btprobe charset <endpoint>       print the Spanish charset under each code page
 //	btprobe multi <ep1> <ep2> ...    concurrent repeated prints on several printers
@@ -23,7 +23,6 @@ import (
 	"print-agent/internal/config"
 	"print-agent/internal/escpos"
 	"print-agent/internal/platform/host"
-	"print-agent/internal/transport"
 )
 
 func main() {
@@ -60,11 +59,11 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage: btprobe <command>
 
-  list                       enumerate candidate serial endpoints
+  list                       enumerate candidate printer endpoints
   test <endpoint>            print a test page (-encoding CP858, -width 32)
   charset <endpoint>         print Spanish chars under CP437/CP850/CP858/CP1252
   multi <ep1> <ep2> [...]    concurrent prints (-rounds 5)
-  status <endpoint>          probe DLE EOT real-time status support`)
+  status <serial-endpoint>   probe DLE EOT real-time status support (serial paths only)`)
 }
 
 func printerConfig(endpoint, encoding string, width int) config.PrinterConfig {
@@ -161,12 +160,13 @@ func cmdMulti(ctx context.Context, args []string) error {
 		return fmt.Errorf("usage: btprobe multi <endpoint1> <endpoint2> [...]")
 	}
 
+	driver := host.New()
 	var wg sync.WaitGroup
 	results := make([][]string, fs.NArg())
 	for i, endpoint := range fs.Args() {
 		wg.Go(func() {
 			cfg := printerConfig(endpoint, *encoding, *width)
-			t := transport.NewSerial(cfg)
+			t := driver.NewTransport(cfg)
 			if err := t.Connect(ctx); err != nil {
 				results[i] = append(results[i], fmt.Sprintf("connect: FAIL %v", err))
 				return
@@ -207,15 +207,21 @@ func cmdMulti(ctx context.Context, args []string) error {
 }
 
 // cmdStatus probes DLE EOT n (real-time status) for n=1..4 and reports
-// whether the printer answers. Uses the serial library directly because the
-// agent transport is deliberately write-only.
+// whether the printer answers. It is limited to serial device paths because
+// the agent transport is deliberately write-only; in particular, a Linux
+// rfcomm:// endpoint receives its socket from BlueZ and cannot be opened by
+// the serial library.
 func cmdStatus(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: btprobe status <endpoint>")
 	}
-	port, err := serial.Open(fs.Arg(0), &serial.Mode{BaudRate: 9600})
+	endpoint := fs.Arg(0)
+	if strings.Contains(endpoint, "://") {
+		return fmt.Errorf("status probing requires a serial device path; %q uses a platform transport that does not expose reads", endpoint)
+	}
+	port, err := serial.Open(endpoint, &serial.Mode{BaudRate: 9600})
 	if err != nil {
 		return err
 	}
@@ -238,7 +244,7 @@ func cmdStatus(_ context.Context, args []string) error {
 		}
 	}
 	if supported {
-		fmt.Println("\nreal-time status IS supported — statusProbeEnabled can be used for this model")
+		fmt.Println("\nreal-time status IS supported by this model; runtime status polling is not yet enabled in print-agent")
 	} else {
 		fmt.Println("\nno real-time status responses — rely on write errors for disconnect detection")
 	}
@@ -246,7 +252,7 @@ func cmdStatus(_ context.Context, args []string) error {
 }
 
 func writeOnce(ctx context.Context, cfg config.PrinterConfig, doc []byte) error {
-	t := transport.NewSerial(cfg)
+	t := host.New().NewTransport(cfg)
 	fmt.Printf("connecting to %s...\n", cfg.Endpoint)
 	start := time.Now()
 	if err := t.Connect(ctx); err != nil {

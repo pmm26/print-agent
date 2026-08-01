@@ -20,7 +20,34 @@ import (
 // off, so the write path alone cannot detect a dead link.
 var ErrNotConnected = errors.New("device is paired but not connected")
 
-// Candidate is a serial endpoint that may correspond to a paired printer.
+// Bluetooth management errors let the local API return useful, stable error
+// codes without exposing BlueZ's implementation-specific D-Bus messages.
+var (
+	ErrInvalidBluetoothAddress = errors.New("invalid Bluetooth address")
+	ErrBluetoothDeviceNotFound = errors.New("Bluetooth device not found")
+	ErrBluetoothUnavailable    = errors.New("Bluetooth is unavailable")
+	ErrBluetoothPairInProgress = errors.New("Bluetooth pairing is already in progress")
+	ErrBluetoothPairRejected   = errors.New("Bluetooth pairing was rejected")
+	ErrBluetoothPairTimeout    = errors.New("Bluetooth pairing timed out")
+	ErrBluetoothPairFailed     = errors.New("Bluetooth pairing failed")
+)
+
+type LinkState string
+
+const (
+	LinkUnknown      LinkState = "unknown"
+	LinkConnected    LinkState = "connected"
+	LinkDisconnected LinkState = "disconnected"
+)
+
+// LinkVerifier is implemented by production drivers that can distinguish a
+// confirmed link from an unknown state. Workers require confirmation before
+// claiming Bluetooth work.
+type LinkVerifier interface {
+	LinkState(ctx context.Context, cfg config.PrinterConfig) (LinkState, error)
+}
+
+// Candidate is a platform endpoint that may correspond to a Bluetooth printer.
 type Candidate struct {
 	Endpoint string `json:"endpoint"`
 	// DeviceName is the paired Bluetooth device name when it could be
@@ -35,8 +62,29 @@ type Candidate struct {
 	IsPrinter bool `json:"isPrinter"`
 }
 
+// BluetoothDevice is a device visible to the host Bluetooth stack. Unlike a
+// Candidate it may not be paired yet and therefore may not have a usable
+// printer endpoint.
+type BluetoothDevice struct {
+	Name      string `json:"name,omitempty"`
+	Address   string `json:"address"`
+	Paired    bool   `json:"paired"`
+	Connected bool   `json:"connected"`
+	IsPrinter bool   `json:"isPrinter"`
+	Endpoint  string `json:"endpoint,omitempty"`
+}
+
+// BluetoothPairer is an optional capability implemented by platforms which
+// can perform discovery and pairing without handing off to a desktop UI.
+// Linux implements this through BlueZ; callers must feature-detect it.
+type BluetoothPairer interface {
+	ListBluetoothDevices(ctx context.Context) ([]BluetoothDevice, error)
+	StartBluetoothDiscovery(ctx context.Context) error
+	StopBluetoothDiscovery(ctx context.Context) error
+	PairBluetoothDevice(ctx context.Context, address, pin string) (BluetoothDevice, error)
+}
+
 // Driver is one platform's implementation of Bluetooth-printer plumbing.
-// Pairing itself is delegated to the OS Bluetooth settings in v1.
 type Driver interface {
 	// Name identifies the driver ("darwin", "linux", …) for diagnostics.
 	Name() string

@@ -17,10 +17,11 @@ const (
 // Builder accumulates ESC/POS commands for one document. It is not safe for
 // concurrent use; create one per render.
 type Builder struct {
-	buf   []byte
-	cp    codePage
-	width int // characters per line at normal size
-	err   error
+	buf    []byte
+	cp     codePage
+	width  int // characters per line at normal size
+	double bool
+	err    error
 }
 
 // NewBuilder creates a builder for the given encoding name and line width.
@@ -60,12 +61,13 @@ func (b *Builder) DoubleSize(on bool) *Builder {
 	if on {
 		v = 0x30 // GS ! n: width x2 | height x2
 	}
+	b.double = on
 	return b.raw(0x1D, '!', v)
 }
 
 // Text writes the string wrapped to the line width, ending each line with LF.
 func (b *Builder) Text(s string) *Builder {
-	for _, line := range wrap(s, b.width) {
+	for _, line := range wrap(s, b.textWidth()) {
 		b.buf = append(b.buf, encodeText(b.cp, line)...)
 		b.buf = append(b.buf, '\n')
 	}
@@ -85,8 +87,9 @@ func (b *Builder) TextDouble(s string) *Builder {
 // spaces. Overflow wraps the left column and keeps the right column on the
 // final line.
 func (b *Builder) TwoColumns(left, right string) *Builder {
+	width := b.textWidth()
 	rw := utf8.RuneCountInString(right)
-	avail := b.width - rw - 1
+	avail := width - rw - 1
 	if avail < 4 {
 		b.Text(left)
 		b.Align(AlignRight).Text(right).Align(AlignLeft)
@@ -95,13 +98,20 @@ func (b *Builder) TwoColumns(left, right string) *Builder {
 	lines := wrap(left, avail)
 	for i, line := range lines {
 		if i == len(lines)-1 {
-			pad := b.width - utf8.RuneCountInString(line) - rw
+			pad := width - utf8.RuneCountInString(line) - rw
 			b.Text(line + strings.Repeat(" ", pad) + right)
 		} else {
 			b.Text(line)
 		}
 	}
 	return b
+}
+
+func (b *Builder) textWidth() int {
+	if b.double {
+		return max(1, b.width/2)
+	}
+	return b.width
 }
 
 // Separator writes a full-width dashed line.

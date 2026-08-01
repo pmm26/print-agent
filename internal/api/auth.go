@@ -23,22 +23,31 @@ const pairingCodeTTL = 5 * time.Minute
 type AuthService struct {
 	db *sql.DB
 
-	mu            sync.Mutex
-	pairingCode   string
-	pairingExpiry time.Time
+	mu              sync.Mutex
+	pairingCode     string
+	pairingExpiry   time.Time
+	pairingFailures int
+	lastPersisted   map[string]time.Time
 }
 
-func NewAuthService(db *sql.DB) *AuthService { return &AuthService{db: db} }
+func NewAuthService(db *sql.DB) *AuthService {
+	return &AuthService{db: db, lastPersisted: make(map[string]time.Time)}
+}
 
 // GeneratePairingCode invalidates any previous code and returns a new one.
-func (a *AuthService) GeneratePairingCode() (string, time.Time) {
-	n, _ := rand.Int(rand.Reader, big.NewInt(1000000))
+func (a *AuthService) GeneratePairingCode() (string, time.Time, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(1000000))
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("generate pairing code: %w", err)
+	}
 	code := fmt.Sprintf("%06d", n.Int64())
 	a.mu.Lock()
 	a.pairingCode = code
 	a.pairingExpiry = time.Now().Add(pairingCodeTTL)
+	a.pairingFailures = 0
+	expires := a.pairingExpiry
 	a.mu.Unlock()
-	return code, a.pairingExpiry
+	return code, expires, nil
 }
 
 var ErrPairingRejected = errors.New("invalid or expired pairing code")
@@ -51,6 +60,12 @@ func (a *AuthService) Pair(code, origin, label string) (string, error) {
 		subtle.ConstantTimeCompare([]byte(code), []byte(a.pairingCode)) == 1
 	if valid {
 		a.pairingCode = "" // one-time use
+		a.pairingFailures = 0
+	} else if a.pairingCode != "" {
+		a.pairingFailures++
+		if a.pairingFailures >= 5 {
+			a.pairingCode = ""
+		}
 	}
 	a.mu.Unlock()
 	if !valid {
@@ -58,7 +73,9 @@ func (a *AuthService) Pair(code, origin, label string) (string, error) {
 	}
 
 	raw := make([]byte, 32)
-	rand.Read(raw)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("generate client token: %w", err)
+	}
 	token := "pat_" + hex.EncodeToString(raw)
 	id := hex.EncodeToString(raw[:8])
 	if label == "" {
@@ -80,19 +97,39 @@ func hashToken(token string) string {
 
 // ValidateToken reports whether the bearer token is active, and updates its
 // last-used timestamp.
-func (a *AuthService) ValidateToken(token string) bool {
+func (a *AuthService) ValidateToken(token, origin string) bool {
+	ok, _ := a.validateToken(token, origin)
+	return ok
+}
+
+func (a *AuthService) validateToken(token, origin string) (bool, error) {
 	if token == "" {
-		return false
+		return false, nil
 	}
 	var id string
 	err := a.db.QueryRow(`SELECT id FROM client_tokens
-		WHERE token_hash = ? AND revoked_at IS NULL`, hashToken(token)).Scan(&id)
-	if err != nil {
-		return false
+		WHERE token_hash = ? AND allowed_origin = ? AND revoked_at IS NULL`, hashToken(token), origin).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
 	}
-	a.db.Exec(`UPDATE client_tokens SET last_used_at = ? WHERE id = ?`,
-		time.Now().UTC().Format(time.RFC3339Nano), id)
-	return true
+	if err != nil {
+		return false, err
+	}
+	now := time.Now()
+	a.mu.Lock()
+	last := a.lastPersisted[id]
+	a.mu.Unlock()
+	if now.Sub(last) >= 5*time.Minute {
+		if _, err := a.db.Exec(`UPDATE client_tokens SET last_used_at = ? WHERE id = ?`,
+			now.UTC().Format(time.RFC3339Nano), id); err == nil {
+			a.mu.Lock()
+			a.lastPersisted[id] = now
+			a.mu.Unlock()
+		} else {
+			return true, err
+		}
+	}
+	return true, nil
 }
 
 // TokenInfo is the dashboard view of an issued token (never the token).

@@ -6,8 +6,12 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
+	"mime"
 	"net/http"
+	"strings"
 
 	"print-agent/internal/config"
 	"print-agent/internal/diagnostics"
@@ -27,7 +31,8 @@ type Server struct {
 	diag        *diagnostics.Service
 	auth        *AuthService
 	bus         *events.Bus
-	limiter     *rateLimiter
+	limiter     *keyedRateLimiter
+	pairLimiter *rateLimiter
 	log         *slog.Logger
 }
 
@@ -43,7 +48,8 @@ func NewServer(jobsService *jobs.Service, jobsRepo *jobs.Repository, manager *pr
 		diag:        diag,
 		auth:        auth,
 		bus:         bus,
-		limiter:     newRateLimiter(20, 40),
+		limiter:     newKeyedRateLimiter(20, 40),
+		pairLimiter: newRateLimiter(0.2, 5),
 		log:         log,
 	}
 }
@@ -58,15 +64,21 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.Handle("POST /api/v1/jobs", pos(s.handleCreateJob))
 	mux.Handle("OPTIONS /api/v1/jobs", pos(s.noContent))
-	mux.Handle("GET /api/v1/jobs/{jobID}", pos(s.handleGetJob))
-	mux.Handle("OPTIONS /api/v1/jobs/{jobID}", pos(s.noContent))
+	mux.Handle("GET /api/v1/jobs", pos(s.handleListJobs))
+	mux.Handle("GET /api/v1/jobs/{jobUID}", pos(s.handleGetJob))
+	mux.Handle("OPTIONS /api/v1/jobs/{jobUID}", pos(s.noContent))
+	mux.Handle("GET /api/v1/print-runs/{runUID}", pos(s.handleGetPrintRun))
+	mux.Handle("OPTIONS /api/v1/print-runs/{runUID}", pos(s.noContent))
+	mux.Handle("POST /api/v1/jobs/{jobUID}/reprint", pos(s.handleReprint))
+	mux.Handle("OPTIONS /api/v1/jobs/{jobUID}/reprint", pos(s.noContent))
 	mux.Handle("GET /api/v1/status", pos(s.handleStatus))
 	mux.Handle("OPTIONS /api/v1/status", pos(s.noContent))
-	mux.Handle("POST /api/v1/pair", chain(http.HandlerFunc(s.handlePair), s.posCORS, s.rateLimit, s.limitBody))
+	mux.Handle("POST /api/v1/pair", chain(http.HandlerFunc(s.handlePair), s.posCORS, s.pairRateLimit, s.limitBody))
 	mux.Handle("OPTIONS /api/v1/pair", chain(http.HandlerFunc(s.noContent), s.posCORS))
 
-	// Health is unauthenticated and origin-agnostic by design.
-	mux.HandleFunc("GET /api/v1/health", s.handleHealth)
+	// Health is unauthenticated but still uses the configured browser origin.
+	mux.Handle("GET /api/v1/health", chain(http.HandlerFunc(s.handleHealth), s.posCORS, s.rateLimit))
+	mux.Handle("OPTIONS /api/v1/health", chain(http.HandlerFunc(s.noContent), s.posCORS))
 
 	// Management endpoints: local browser or local tools only.
 	admin := func(h http.HandlerFunc) http.Handler {
@@ -82,11 +94,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/printers/{printerID}/enable", admin(s.handleEnable(true)))
 	mux.Handle("POST /api/v1/printers/{printerID}/disable", admin(s.handleEnable(false)))
 	mux.Handle("GET /api/v1/bluetooth/candidates", admin(s.handleCandidates))
+	mux.Handle("GET /api/v1/bluetooth/devices", admin(s.handleBluetoothDevices))
+	mux.Handle("POST /api/v1/bluetooth/discovery/start", admin(s.handleStartBluetoothDiscovery))
+	mux.Handle("POST /api/v1/bluetooth/discovery/stop", admin(s.handleStopBluetoothDiscovery))
+	mux.Handle("POST /api/v1/bluetooth/devices/{address}/pair", admin(s.handlePairBluetoothDevice))
 	mux.Handle("POST /api/v1/system/open-bluetooth-settings", admin(s.handleOpenBluetooth))
-	mux.Handle("GET /api/v1/deliveries", admin(s.handleListDeliveries))
-	mux.Handle("POST /api/v1/deliveries/{deliveryID}/reprint", admin(s.handleReprint))
-	mux.Handle("POST /api/v1/deliveries/{deliveryID}/resolve", admin(s.handleResolve))
-	mux.Handle("POST /api/v1/deliveries/{deliveryID}/cancel", admin(s.handleCancel))
+	mux.Handle("GET /api/v1/printers/{printerID}/queue", admin(s.handlePrinterQueue))
+	mux.Handle("POST /api/v1/print-runs/{runUID}/confirm-printed", admin(s.handleConfirmPrinted))
+	mux.Handle("POST /api/v1/print-runs/{runUID}/cancel", admin(s.handleCancelRun))
+	mux.Handle("POST /api/v1/jobs/{jobUID}/cancel", admin(s.handleCancelJob))
 	mux.Handle("GET /api/v1/logs", admin(s.handleLogs))
 	mux.Handle("GET /api/v1/diagnostics", admin(s.handleDiagnostics))
 	mux.Handle("GET /api/v1/diagnostics/export", admin(s.handleDiagnosticsExport))
@@ -97,9 +113,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/admin/settings", admin(s.handlePutSettings))
 
 	// Embedded dashboard.
-	mux.Handle("/admin/", http.StripPrefix("/admin/", webui.Handler()))
-	mux.Handle("/admin", http.RedirectHandler("/admin/", http.StatusMovedPermanently))
-	mux.Handle("/", http.RedirectHandler("/admin/", http.StatusFound))
+	mux.Handle("/admin/", http.StripPrefix("/admin", webui.Handler()))
+	mux.Handle("/admin", http.RedirectHandler("/admin/operations/jobs", http.StatusFound))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			writeJSON(w, http.StatusNotFound, errorResponse{Code: "not_found", Error: "not found"})
+			return
+		}
+		http.Redirect(w, r, "/admin/", http.StatusFound)
+	})
 
 	return s.logRequests(mux)
 }
@@ -123,21 +145,74 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+func decodeJSON(r *http.Request, dst any) error {
+	contentType := r.Header.Get("Content-Type")
+	if contentType == "" {
+		return errors.New("Content-Type must be application/json")
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType != "application/json" {
+		return errors.New("Content-Type must be application/json")
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body must contain exactly one JSON value")
+		}
+		return fmt.Errorf("invalid trailing JSON: %w", err)
+	}
+	return nil
+}
+
 type errorResponse struct {
+	Code  string `json:"code"`
 	Error string `json:"error"`
 }
 
 // writeError maps service errors to HTTP statuses.
 func writeError(w http.ResponseWriter, err error) {
 	var ve *jobs.ValidationError
+	var ce *jobs.ConflictError
 	switch {
 	case errors.As(err, &ve):
-		writeJSON(w, http.StatusBadRequest, errorResponse{Error: ve.Error()})
+		writeJSON(w, http.StatusBadRequest, errorResponse{Code: "invalid_request", Error: ve.Error()})
+	case errors.As(err, &ce):
+		code := ce.Code
+		if code == "" {
+			code = "conflict"
+		}
+		writeJSON(w, http.StatusConflict, errorResponse{Code: code, Error: ce.Error()})
 	case errors.Is(err, jobs.ErrNotFound), errors.Is(err, config.ErrNotFound):
-		writeJSON(w, http.StatusNotFound, errorResponse{Error: "not found"})
+		writeJSON(w, http.StatusNotFound, errorResponse{Code: "not_found", Error: "not found"})
 	case errors.Is(err, ErrPairingRejected):
-		writeJSON(w, http.StatusForbidden, errorResponse{Error: err.Error()})
+		writeJSON(w, http.StatusForbidden, errorResponse{Code: "pairing_rejected", Error: err.Error()})
 	default:
-		writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+		slog.Error("API request failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorResponse{Code: "internal_error", Error: "internal server error"})
+	}
+}
+
+func (s *Server) writeBluetoothError(w http.ResponseWriter, address string, err error) {
+	s.log.Error("Bluetooth pairing failed", "address", address, "error", err)
+	switch {
+	case errors.Is(err, platform.ErrInvalidBluetoothAddress):
+		writeJSON(w, http.StatusBadRequest, errorResponse{Code: "invalid_address", Error: "invalid Bluetooth device address"})
+	case errors.Is(err, platform.ErrBluetoothDeviceNotFound):
+		writeJSON(w, http.StatusNotFound, errorResponse{Code: "bluetooth_device_not_found", Error: "Bluetooth device is no longer available; scan again"})
+	case errors.Is(err, platform.ErrBluetoothPairInProgress):
+		writeJSON(w, http.StatusConflict, errorResponse{Code: "pairing_in_progress", Error: "Bluetooth pairing is already in progress"})
+	case errors.Is(err, platform.ErrBluetoothPairRejected):
+		writeJSON(w, http.StatusConflict, errorResponse{Code: "pairing_failed", Error: "pairing was rejected; put the printer in pairing mode and verify its PIN"})
+	case errors.Is(err, platform.ErrBluetoothPairTimeout):
+		writeJSON(w, http.StatusGatewayTimeout, errorResponse{Code: "pairing_timeout", Error: "pairing timed out; put the printer in pairing mode and try again"})
+	case errors.Is(err, platform.ErrBluetoothUnavailable):
+		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Code: "bluetooth_unavailable", Error: "Bluetooth is unavailable; check that the adapter is powered on"})
+	default:
+		writeJSON(w, http.StatusBadGateway, errorResponse{Code: "bluetooth_error", Error: "BlueZ could not pair the device; check the agent log for details"})
 	}
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"strings"
@@ -36,7 +37,7 @@ func (s *Server) posCORS(next http.Handler) http.Handler {
 			if allowed == "" || origin != allowed {
 				s.bus.Publish(events.Event{Type: events.AuthDenied,
 					Message: fmt.Sprintf("origin %q rejected for %s %s", origin, r.Method, r.URL.Path)})
-				http.Error(w, "origin not allowed", http.StatusForbidden)
+				writeJSON(w, http.StatusForbidden, errorResponse{Code: "origin_forbidden", Error: "origin not allowed"})
 				return
 			}
 			h := w.Header()
@@ -44,7 +45,7 @@ func (s *Server) posCORS(next http.Handler) http.Handler {
 			h.Set("Vary", "Origin")
 			if r.Method == http.MethodOptions {
 				h.Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key")
+				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 				h.Set("Access-Control-Max-Age", "600")
 				// Legacy Chromium Private Network Access preflights.
 				if r.Header.Get("Access-Control-Request-Private-Network") == "true" {
@@ -66,10 +67,14 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		origin := r.Header.Get("Origin")
 		if origin != "" && !isLocalOrigin(origin) {
 			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if !s.auth.ValidateToken(token) {
+			valid, err := s.auth.validateToken(token, origin)
+			if err != nil {
+				s.log.Error("token validation persistence failed", "origin", origin, "error", err)
+			}
+			if !valid {
 				s.bus.Publish(events.Event{Type: events.AuthDenied,
 					Message: fmt.Sprintf("invalid token from origin %q for %s %s", origin, r.Method, r.URL.Path)})
-				http.Error(w, "invalid or missing token", http.StatusUnauthorized)
+				writeJSON(w, http.StatusUnauthorized, errorResponse{Code: "unauthorized", Error: "invalid or missing token"})
 				return
 			}
 		}
@@ -85,7 +90,7 @@ func (s *Server) localOnly(next http.Handler) http.Handler {
 		if origin != "" && !isLocalOrigin(origin) {
 			s.bus.Publish(events.Event{Type: events.AuthDenied,
 				Message: fmt.Sprintf("origin %q rejected for admin endpoint %s", origin, r.URL.Path)})
-			http.Error(w, "forbidden", http.StatusForbidden)
+			writeJSON(w, http.StatusForbidden, errorResponse{Code: "admin_origin_forbidden", Error: "forbidden"})
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -99,6 +104,35 @@ type rateLimiter struct {
 	max    float64
 	rate   float64 // tokens per second
 	last   time.Time
+}
+
+type keyedRateLimiter struct {
+	mu          sync.Mutex
+	rate, burst float64
+	buckets     map[string]*rateLimiter
+}
+
+func newKeyedRateLimiter(ratePerSec, burst float64) *keyedRateLimiter {
+	return &keyedRateLimiter{rate: ratePerSec, burst: burst, buckets: make(map[string]*rateLimiter)}
+}
+
+func (l *keyedRateLimiter) allow(key string) bool {
+	l.mu.Lock()
+	bucket := l.buckets[key]
+	if bucket == nil {
+		bucket = newRateLimiter(l.rate, l.burst)
+		l.buckets[key] = bucket
+	}
+	l.mu.Unlock()
+	return bucket.allow()
+}
+
+func requestRateKey(r *http.Request) string {
+	identity := r.Header.Get("Origin") + "\x00" + r.Header.Get("Authorization")
+	if identity == "\x00" {
+		identity = r.RemoteAddr
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(identity)))
 }
 
 func newRateLimiter(ratePerSec, burst float64) *rateLimiter {
@@ -120,8 +154,18 @@ func (l *rateLimiter) allow() bool {
 
 func (s *Server) rateLimit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.limiter.allow() {
-			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+		if !s.limiter.allow(requestRateKey(r)) {
+			writeJSON(w, http.StatusTooManyRequests, errorResponse{Code: "rate_limited", Error: "rate limit exceeded"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) pairRateLimit(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.pairLimiter.allow() {
+			writeJSON(w, http.StatusTooManyRequests, errorResponse{Code: "rate_limited", Error: "pairing rate limit exceeded"})
 			return
 		}
 		next.ServeHTTP(w, r)

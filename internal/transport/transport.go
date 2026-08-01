@@ -19,11 +19,23 @@ var (
 )
 
 // WriteError reports how much of the payload was handed to the OS before a
-// write failed, which decides between the `failed` and `uncertain` delivery
+// write failed, which decides between the `failed` and `uncertain` Print Run
 // states.
 type WriteError struct {
 	BytesWritten int
+	Outcome      WriteOutcome
 	Err          error
+}
+
+type WriteOutcome string
+
+const (
+	WriteNotSent   WriteOutcome = "not-sent"
+	WriteAmbiguous WriteOutcome = "ambiguous"
+)
+
+func (e *WriteError) Ambiguous() bool {
+	return e != nil && (e.Outcome == WriteAmbiguous || e.BytesWritten > 0 || errors.Is(e.Err, ErrWriteTimeout))
 }
 
 func (e *WriteError) Error() string { return e.Err.Error() }

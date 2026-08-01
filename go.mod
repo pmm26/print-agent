@@ -3,6 +3,7 @@ module print-agent
 go 1.26.5
 
 require (
+	github.com/godbus/dbus/v5 v5.2.2
 	go.bug.st/serial v1.8.0
 	golang.org/x/text v0.40.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
