@@ -5,25 +5,27 @@ import (
 	"fmt"
 	"sync"
 
-	"print-agent/internal/bluetooth"
 	"print-agent/internal/config"
 	"print-agent/internal/escpos"
 	"print-agent/internal/events"
 	"print-agent/internal/jobs"
+	"print-agent/internal/platform"
 	"print-agent/internal/transport"
 )
 
 // TransportFactory builds a transport for a printer config. Production uses
-// DefaultTransportFactory; tests inject mocks.
+// the platform driver's transport; tests inject mocks.
 type TransportFactory func(config.PrinterConfig) transport.Transport
 
-// DefaultTransportFactory maps the configured transport kind to a real
-// implementation.
-func DefaultTransportFactory(cfg config.PrinterConfig) transport.Transport {
-	if cfg.Transport == config.TransportMock {
-		return transport.NewMock(cfg.Endpoint)
+// driverTransportFactory routes mock printers to the in-process fake and
+// everything else to the platform driver's transport.
+func driverTransportFactory(driver platform.Driver) TransportFactory {
+	return func(cfg config.PrinterConfig) transport.Transport {
+		if cfg.Transport == config.TransportMock {
+			return transport.NewMock(cfg.Endpoint)
+		}
+		return driver.NewTransport(cfg)
 	}
-	return transport.NewSerial(cfg)
 }
 
 // Manager owns all printer workers. It is the only component that starts,
@@ -32,7 +34,7 @@ type Manager struct {
 	configRepo *config.Repository
 	jobsRepo   *jobs.Repository
 	renderer   *escpos.Renderer
-	connector  bluetooth.Connector
+	driver     platform.Driver
 	bus        *events.Bus
 	factory    TransportFactory
 
@@ -42,15 +44,15 @@ type Manager struct {
 }
 
 func NewManager(configRepo *config.Repository, jobsRepo *jobs.Repository,
-	connector bluetooth.Connector, bus *events.Bus, factory TransportFactory) *Manager {
+	driver platform.Driver, bus *events.Bus, factory TransportFactory) *Manager {
 	if factory == nil {
-		factory = DefaultTransportFactory
+		factory = driverTransportFactory(driver)
 	}
 	return &Manager{
 		configRepo: configRepo,
 		jobsRepo:   jobsRepo,
 		renderer:   escpos.NewRenderer(),
-		connector:  connector,
+		driver:     driver,
 		bus:        bus,
 		factory:    factory,
 		workers:    map[string]*worker{},
@@ -90,7 +92,7 @@ func (m *Manager) Stop() {
 }
 
 func (m *Manager) startWorker(cfg config.PrinterConfig) {
-	w := newWorker(cfg, m.jobsRepo, m.renderer, m.connector, m.bus, m.factory)
+	w := newWorker(cfg, m.jobsRepo, m.renderer, m.driver, m.bus, m.factory)
 	m.mu.Lock()
 	m.workers[cfg.ID] = w
 	ctx := m.ctx

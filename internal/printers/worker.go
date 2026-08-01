@@ -7,11 +7,11 @@ import (
 	"sync"
 	"time"
 
-	"print-agent/internal/bluetooth"
 	"print-agent/internal/config"
 	"print-agent/internal/escpos"
 	"print-agent/internal/events"
 	"print-agent/internal/jobs"
+	"print-agent/internal/platform"
 	"print-agent/internal/transport"
 )
 
@@ -28,7 +28,7 @@ type worker struct {
 	cfg          config.PrinterConfig
 	repo         *jobs.Repository
 	renderer     *escpos.Renderer
-	connector    bluetooth.Connector
+	driver       platform.Driver
 	bus          *events.Bus
 	newTransport func(config.PrinterConfig) transport.Transport
 
@@ -47,13 +47,13 @@ type worker struct {
 }
 
 func newWorker(cfg config.PrinterConfig, repo *jobs.Repository, renderer *escpos.Renderer,
-	connector bluetooth.Connector, bus *events.Bus,
+	driver platform.Driver, bus *events.Bus,
 	factory func(config.PrinterConfig) transport.Transport) *worker {
 	return &worker{
 		cfg:          cfg,
 		repo:         repo,
 		renderer:     renderer,
-		connector:    connector,
+		driver:       driver,
 		bus:          bus,
 		newTransport: factory,
 		wake:         make(chan struct{}, 1),
@@ -128,7 +128,7 @@ func (w *worker) connectLoop(ctx context.Context) bool {
 	if alreadyConnected {
 		// The endpoint being open proves little on macOS; confirm the OS
 		// still reports the Bluetooth link up.
-		if err := w.connector.VerifyConnected(ctx, w.cfg); err == nil {
+		if err := w.driver.VerifyConnected(ctx, w.cfg); err == nil {
 			return true
 		}
 		w.closeTransport(StateDisconnected, "bluetooth link lost")
@@ -195,10 +195,10 @@ func (w *worker) connectLoop(ctx context.Context) bool {
 
 func (w *worker) connectOnce(ctx context.Context) error {
 	cfg := w.cfg
-	// Only real Bluetooth serial endpoints need the platform connector; the
-	// mock transport exists purely in-process.
+	// Only real Bluetooth serial endpoints need the platform driver's
+	// endpoint resolution; the mock transport exists purely in-process.
 	if cfg.Transport == config.TransportBluetoothSerial {
-		endpoint, err := w.connector.EnsureConnected(ctx, w.cfg)
+		endpoint, err := w.driver.EnsureConnected(ctx, w.cfg)
 		if err != nil {
 			return err
 		}
@@ -211,14 +211,14 @@ func (w *worker) connectOnce(ctx context.Context) error {
 	// Opening the endpoint succeeds on macOS even when the printer is off.
 	// Confirm the OS-level Bluetooth link; the open may itself trigger the
 	// link to come up, so allow one short grace retry.
-	if err := w.connector.VerifyConnected(ctx, cfg); err != nil {
+	if err := w.driver.VerifyConnected(ctx, cfg); err != nil {
 		select {
-		case <-time.After(4 * time.Second): // outlive the connector's state cache
+		case <-time.After(4 * time.Second): // outlive the driver's state cache
 		case <-ctx.Done():
 			tr.Close()
 			return ctx.Err()
 		}
-		if err := w.connector.VerifyConnected(ctx, cfg); err != nil {
+		if err := w.driver.VerifyConnected(ctx, cfg); err != nil {
 			tr.Close()
 			return fmt.Errorf("endpoint %s opened but %w — is the printer on?", cfg.Endpoint, err)
 		}
@@ -270,7 +270,7 @@ func (w *worker) process(ctx context.Context, d jobs.Delivery) {
 		// The OS accepted every byte, but on macOS that only means they were
 		// buffered. Claim `transmitted` only while the Bluetooth link is
 		// confirmed up; otherwise the ticket's fate is unknowable.
-		if verr := w.connector.VerifyConnected(ctx, w.cfg); verr != nil {
+		if verr := w.driver.VerifyConnected(ctx, w.cfg); verr != nil {
 			w.closeTransport(StateDisconnected, verr.Error())
 			w.repo.MarkUncertain(d.ID, len(doc),
 				"bytes accepted by the OS but the printer is not connected")

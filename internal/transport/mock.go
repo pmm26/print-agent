@@ -16,10 +16,10 @@ type MockTransport struct {
 	writes    [][]byte
 
 	// Failure injection. All optional.
-	FailConnect  error // returned by Connect
-	FailWrite    error // returned by Write (wrapped in *WriteError)
-	FailAfter    int   // bytes accepted before FailWrite triggers (0 = fail immediately)
-	HangOnWrite  bool  // block until ctx is done, simulating a stalled link
+	FailConnect   error // returned by Connect
+	FailWrite     error // returned by Write (wrapped in *WriteError)
+	FailAfter     int   // bytes accepted before FailWrite triggers (0 = fail immediately)
+	HangOnWrite   bool  // block until ctx is done, simulating a stalled link
 	failWriteOnce bool
 	// OnWrite, when set, runs after a successful write completes — lets
 	// tests change state at the exact moment bytes have been "accepted".

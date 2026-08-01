@@ -37,7 +37,7 @@ func NewBuilder(encodingName string, width int) (*Builder, error) {
 
 // Init resets the printer and selects the configured code page.
 func (b *Builder) Init() *Builder {
-	b.raw(0x1B, '@')             // ESC @ initialize
+	b.raw(0x1B, '@')               // ESC @ initialize
 	b.raw(0x1B, 't', b.cp.escposN) // ESC t n select code page
 	return b
 }

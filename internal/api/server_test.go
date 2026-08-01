@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"print-agent/internal/bluetooth"
 	"print-agent/internal/config"
 	"print-agent/internal/diagnostics"
 	"print-agent/internal/escpos"
 	"print-agent/internal/events"
 	"print-agent/internal/jobs"
+	"print-agent/internal/platform"
 	"print-agent/internal/printers"
 	"print-agent/internal/storage"
 
@@ -23,19 +22,7 @@ import (
 
 const posOrigin = "https://pos.example.com"
 
-type stubConnector struct{}
-
-func (stubConnector) EnsureConnected(ctx context.Context, cfg config.PrinterConfig) (string, error) {
-	return cfg.Endpoint, nil
-}
-func (stubConnector) Disconnect(ctx context.Context, cfg config.PrinterConfig) error { return nil }
-func (stubConnector) ListCandidates(ctx context.Context) ([]bluetooth.Candidate, error) {
-	return nil, nil
-}
-func (stubConnector) OpenSystemBluetoothSettings(ctx context.Context) error { return nil }
-func (stubConnector) VerifyConnected(ctx context.Context, cfg config.PrinterConfig) error {
-	return nil
-}
+type stubDriver struct{ platform.UnimplementedDriver }
 
 func newTestServer(t *testing.T) (*httptest.Server, *AuthService) {
 	t.Helper()
@@ -53,12 +40,12 @@ func newTestServer(t *testing.T) (*httptest.Server, *AuthService) {
 	configRepo.SavePrinter(cfg)
 
 	jobsRepo := jobs.NewRepository(db)
-	manager := printers.NewManager(configRepo, jobsRepo, stubConnector{}, bus, nil)
+	manager := printers.NewManager(configRepo, jobsRepo, stubDriver{}, bus, nil)
 	jobsService := jobs.NewService(jobsRepo, bus, manager, escpos.KnownTemplate)
 	jobsService.SetWaker(manager)
 	auth := NewAuthService(db)
 	diag := diagnostics.NewService(db, "test.db")
-	srv := NewServer(jobsService, jobsRepo, manager, configRepo, stubConnector{}, diag, auth, bus,
+	srv := NewServer(jobsService, jobsRepo, manager, configRepo, stubDriver{}, diag, auth, bus,
 		slog.New(slog.DiscardHandler))
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)

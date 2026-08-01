@@ -11,7 +11,7 @@ import (
 // codePage couples a Go charmap encoder with the ESC t n code-page number
 // used by most Epson-compatible ESC/POS printers.
 type codePage struct {
-	enc    encoding.Encoding
+	enc     encoding.Encoding
 	escposN byte
 }
 

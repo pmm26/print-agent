@@ -19,12 +19,13 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 
 	"print-agent/internal/api"
-	"print-agent/internal/bluetooth"
 	"print-agent/internal/config"
 	"print-agent/internal/diagnostics"
 	"print-agent/internal/escpos"
 	"print-agent/internal/events"
 	"print-agent/internal/jobs"
+	"print-agent/internal/platform"
+	"print-agent/internal/platform/host"
 	"print-agent/internal/printers"
 	"print-agent/internal/storage"
 )
@@ -36,8 +37,8 @@ type Options struct {
 	Console bool // also log human-readably to stderr
 	// TransportFactory overrides the default (integration tests).
 	TransportFactory printers.TransportFactory
-	// Connector overrides the platform Bluetooth connector (tests).
-	Connector bluetooth.Connector
+	// Driver overrides the platform driver (tests).
+	Driver platform.Driver
 	// RetentionDays prunes terminal deliveries/events older than this.
 	RetentionDays int
 }
@@ -114,22 +115,22 @@ func New(opts Options) (*Service, error) {
 			Message: "recovered as uncertain after restart"})
 	}
 
-	connector := opts.Connector
-	if connector == nil {
-		connector = bluetooth.NewPlatformConnector()
+	driver := opts.Driver
+	if driver == nil {
+		driver = host.New()
 	}
-	manager := printers.NewManager(configRepo, jobsRepo, connector, bus, opts.TransportFactory)
+	manager := printers.NewManager(configRepo, jobsRepo, driver, bus, opts.TransportFactory)
 	jobsService := jobs.NewService(jobsRepo, bus, manager, escpos.KnownTemplate)
 	jobsService.SetWaker(manager)
 
 	auth := api.NewAuthService(db)
-	server := api.NewServer(jobsService, jobsRepo, manager, configRepo, connector, diag, auth, bus, logger)
+	server := api.NewServer(jobsService, jobsRepo, manager, configRepo, driver, diag, auth, bus, logger)
 
 	return &Service{
-		opts: opts,
-		log:  logger,
-		db:   db,
-		bus:  bus,
+		opts:    opts,
+		log:     logger,
+		db:      db,
+		bus:     bus,
 		manager: manager,
 		server: &http.Server{
 			Handler:           server.Handler(),

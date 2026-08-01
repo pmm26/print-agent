@@ -14,32 +14,27 @@ import (
 	"testing"
 	"time"
 
-	"print-agent/internal/bluetooth"
 	"print-agent/internal/config"
 	"print-agent/internal/escpos"
 	"print-agent/internal/events"
 	"print-agent/internal/jobs"
+	"print-agent/internal/platform"
 	"print-agent/internal/printers"
 	"print-agent/internal/storage"
 	"print-agent/internal/transport"
 )
 
-// stubConnector mimics the OS view of the Bluetooth link. linkDown
-// simulates macOS reporting the paired printer as disconnected while the
-// serial endpoint still accepts (buffers) writes.
-type stubConnector struct{ linkDown atomic.Bool }
+// stubDriver mimics the OS view of the Bluetooth link. linkDown simulates
+// macOS reporting the paired printer as disconnected while the serial
+// endpoint still accepts (buffers) writes.
+type stubDriver struct {
+	platform.UnimplementedDriver
+	linkDown atomic.Bool
+}
 
-func (c *stubConnector) EnsureConnected(ctx context.Context, cfg config.PrinterConfig) (string, error) {
-	return cfg.Endpoint, nil
-}
-func (c *stubConnector) Disconnect(ctx context.Context, cfg config.PrinterConfig) error { return nil }
-func (c *stubConnector) ListCandidates(ctx context.Context) ([]bluetooth.Candidate, error) {
-	return nil, nil
-}
-func (c *stubConnector) OpenSystemBluetoothSettings(ctx context.Context) error { return nil }
-func (c *stubConnector) VerifyConnected(ctx context.Context, cfg config.PrinterConfig) error {
-	if c.linkDown.Load() {
-		return bluetooth.ErrNotConnected
+func (d *stubDriver) VerifyConnected(ctx context.Context, cfg config.PrinterConfig) error {
+	if d.linkDown.Load() {
+		return platform.ErrNotConnected
 	}
 	return nil
 }
@@ -50,7 +45,7 @@ type harness struct {
 	repo      *jobs.Repository
 	service   *jobs.Service
 	manager   *printers.Manager
-	connector *stubConnector
+	connector *stubDriver
 
 	mu    sync.Mutex
 	mocks map[string]*transport.MockTransport
@@ -64,7 +59,7 @@ func newHarness(t *testing.T, printerIDs ...string) *harness {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := &harness{t: t, mocks: map[string]*transport.MockTransport{}, connector: &stubConnector{}}
+	h := &harness{t: t, mocks: map[string]*transport.MockTransport{}, connector: &stubDriver{}}
 	factory := func(cfg config.PrinterConfig) transport.Transport {
 		h.mu.Lock()
 		defer h.mu.Unlock()

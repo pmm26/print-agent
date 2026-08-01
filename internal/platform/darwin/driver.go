@@ -1,6 +1,11 @@
 //go:build darwin
 
-package bluetooth
+// Package darwin implements the platform driver for macOS. Paired Bluetooth
+// SPP printers surface as /dev/cu.<DeviceName> nodes (spaces stripped or
+// replaced, depending on OS version); the real link state comes from
+// system_profiler, because opening and writing the serial node succeed even
+// when the printer is off.
+package darwin
 
 import (
 	"context"
@@ -15,56 +20,63 @@ import (
 	"time"
 
 	"print-agent/internal/config"
+	"print-agent/internal/platform"
+	"print-agent/internal/transport"
 )
 
-// NewPlatformConnector returns the macOS connector.
-func NewPlatformConnector() Connector { return &darwinConnector{} }
-
-// darwinConnector resolves paired Bluetooth SPP printers to /dev/cu.*
-// endpoints. macOS creates /dev/cu.<DeviceName> (spaces stripped/replaced)
-// for paired devices that expose a serial port profile.
+// Driver is the macOS platform driver.
 //
 // The paired-device snapshot from system_profiler is cached briefly: the
 // command takes ~1s and VerifyConnected is called every few seconds per
 // printer.
-type darwinConnector struct {
+type Driver struct {
 	mu       sync.Mutex
 	cached   []pairedDevice
 	cachedAt time.Time
 }
 
+func New() *Driver { return &Driver{} }
+
+func (d *Driver) Name() string { return "darwin" }
+
+// NewTransport uses the shared serial transport over the /dev/cu.* node.
+func (d *Driver) NewTransport(cfg config.PrinterConfig) transport.Transport {
+	return transport.NewSerial(cfg)
+}
+
 // deviceCacheTTL bounds how stale the paired-device snapshot may be.
 const deviceCacheTTL = 3 * time.Second
 
-func (c *darwinConnector) devices(ctx context.Context) []pairedDevice {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if time.Since(c.cachedAt) > deviceCacheTTL {
-		c.cached = pairedDevices(ctx)
-		c.cachedAt = time.Now()
+func (d *Driver) devices(ctx context.Context) []pairedDevice {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if time.Since(d.cachedAt) > deviceCacheTTL {
+		d.cached = pairedDevices(ctx)
+		d.cachedAt = time.Now()
 	}
-	return c.cached
+	return d.cached
 }
 
-// VerifyConnected reports ErrNotConnected only when the paired device is
-// positively known to be disconnected. Unknown devices (no MAC stored and no
-// name correlation) verify as connected — better optimistic than flapping.
-func (c *darwinConnector) VerifyConnected(ctx context.Context, cfg config.PrinterConfig) error {
+// VerifyConnected reports platform.ErrNotConnected only when the paired
+// device is positively known to be disconnected. Unknown devices (no MAC
+// stored and no name correlation) verify as connected — better optimistic
+// than flapping.
+func (d *Driver) VerifyConnected(ctx context.Context, cfg config.PrinterConfig) error {
 	nodeName := strings.TrimPrefix(filepath.Base(cfg.Endpoint), "cu.")
-	for _, d := range c.devices(ctx) {
-		match := (cfg.DeviceAddress != "" && strings.EqualFold(d.address, cfg.DeviceAddress)) ||
-			matchesDeviceName(d.name, nodeName)
+	for _, dev := range d.devices(ctx) {
+		match := (cfg.DeviceAddress != "" && strings.EqualFold(dev.address, cfg.DeviceAddress)) ||
+			matchesDeviceName(dev.name, nodeName)
 		if match {
-			if d.connected {
+			if dev.connected {
 				return nil
 			}
-			return ErrNotConnected
+			return platform.ErrNotConnected
 		}
 	}
 	return nil // device not in the paired list: state unknowable
 }
 
-func (c *darwinConnector) EnsureConnected(ctx context.Context, cfg config.PrinterConfig) (string, error) {
+func (d *Driver) EnsureConnected(ctx context.Context, cfg config.PrinterConfig) (string, error) {
 	// Fast path: the configured endpoint exists. Opening it triggers the
 	// macOS Bluetooth stack to (re)connect the paired device.
 	if cfg.Endpoint != "" {
@@ -73,8 +85,8 @@ func (c *darwinConnector) EnsureConnected(ctx context.Context, cfg config.Printe
 		}
 	}
 	// The device node vanished (unpaired, renamed, BT restart). Try to
-	// re-resolve by MAC address or device name.
-	cands, err := c.ListCandidates(ctx)
+	// re-resolve by MAC address.
+	cands, err := d.ListCandidates(ctx)
 	if err != nil {
 		return "", fmt.Errorf("endpoint %s missing and candidate scan failed: %w", cfg.Endpoint, err)
 	}
@@ -87,24 +99,24 @@ func (c *darwinConnector) EnsureConnected(ctx context.Context, cfg config.Printe
 		cfg.Endpoint, cfg.DeviceAddress)
 }
 
-func (c *darwinConnector) Disconnect(ctx context.Context, cfg config.PrinterConfig) error {
+func (d *Driver) Disconnect(ctx context.Context, cfg config.PrinterConfig) error {
 	return nil // closing the serial port releases the link on macOS
 }
 
-func (c *darwinConnector) ListCandidates(ctx context.Context) ([]Candidate, error) {
+func (d *Driver) ListCandidates(ctx context.Context) ([]platform.Candidate, error) {
 	devs, err := filepath.Glob("/dev/cu.*")
 	if err != nil {
 		return nil, err
 	}
-	paired := c.devices(ctx)
-	var out []Candidate
+	paired := d.devices(ctx)
+	var out []platform.Candidate
 	for _, dev := range devs {
 		name := strings.TrimPrefix(filepath.Base(dev), "cu.")
 		// Skip endpoints that are definitely not printers.
 		if name == "debug-console" || strings.HasPrefix(name, "Bluetooth-Incoming") {
 			continue
 		}
-		cand := Candidate{Endpoint: dev}
+		cand := platform.Candidate{Endpoint: dev}
 		for _, p := range paired {
 			if matchesDeviceName(p.name, name) {
 				cand.DeviceName = p.name
@@ -120,7 +132,7 @@ func (c *darwinConnector) ListCandidates(ctx context.Context) ([]Candidate, erro
 	return out, nil
 }
 
-func (c *darwinConnector) OpenSystemBluetoothSettings(ctx context.Context) error {
+func (d *Driver) OpenSystemBluetoothSettings(ctx context.Context) error {
 	return exec.CommandContext(ctx, "open", "x-apple.systempreferences:com.apple.BluetoothSettings").Run()
 }
 

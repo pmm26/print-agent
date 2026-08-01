@@ -20,9 +20,9 @@ import (
 
 	"go.bug.st/serial"
 
-	"print-agent/internal/bluetooth"
 	"print-agent/internal/config"
 	"print-agent/internal/escpos"
+	"print-agent/internal/platform/host"
 	"print-agent/internal/transport"
 )
 
@@ -80,8 +80,7 @@ func printerConfig(endpoint, encoding string, width int) config.PrinterConfig {
 }
 
 func cmdList(ctx context.Context) error {
-	conn := bluetooth.NewPlatformConnector()
-	cands, err := conn.ListCandidates(ctx)
+	cands, err := host.New().ListCandidates(ctx)
 	if err != nil {
 		return err
 	}

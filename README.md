@@ -6,9 +6,11 @@ HTTP API; the agent owns all printer logic — queues, reconnects, rendering,
 duplicate prevention — and keeps working with no browser open and no internet.
 
 Current platform support: **macOS** (developed and validated first).
-Windows (COM ports) and Linux (BlueZ/RFCOMM) adapters are planned; the
-transport/connector interfaces already isolate them (`internal/transport`,
-`internal/bluetooth`).
+All OS-specific code lives behind the `platform.Driver` interface in
+`internal/platform/` — one subfolder per OS (`darwin/` is implemented;
+`linux/` and `windows/` are compiling scaffolds that document the planned
+approach). Adding a platform means filling in one folder; the core never
+mentions an operating system.
 
 ## Run
 

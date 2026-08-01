@@ -9,11 +9,11 @@ import (
 	"log/slog"
 	"net/http"
 
-	"print-agent/internal/bluetooth"
 	"print-agent/internal/config"
 	"print-agent/internal/diagnostics"
 	"print-agent/internal/events"
 	"print-agent/internal/jobs"
+	"print-agent/internal/platform"
 	"print-agent/internal/printers"
 	"print-agent/internal/webui"
 )
@@ -23,7 +23,7 @@ type Server struct {
 	jobsRepo    *jobs.Repository
 	manager     *printers.Manager
 	configRepo  *config.Repository
-	connector   bluetooth.Connector
+	driver      platform.Driver
 	diag        *diagnostics.Service
 	auth        *AuthService
 	bus         *events.Bus
@@ -32,14 +32,14 @@ type Server struct {
 }
 
 func NewServer(jobsService *jobs.Service, jobsRepo *jobs.Repository, manager *printers.Manager,
-	configRepo *config.Repository, connector bluetooth.Connector, diag *diagnostics.Service,
+	configRepo *config.Repository, driver platform.Driver, diag *diagnostics.Service,
 	auth *AuthService, bus *events.Bus, log *slog.Logger) *Server {
 	return &Server{
 		jobsService: jobsService,
 		jobsRepo:    jobsRepo,
 		manager:     manager,
 		configRepo:  configRepo,
-		connector:   connector,
+		driver:      driver,
 		diag:        diag,
 		auth:        auth,
 		bus:         bus,

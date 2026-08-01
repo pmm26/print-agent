@@ -227,7 +227,7 @@ func (s *Server) handleTestPrint(w http.ResponseWriter, r *http.Request) {
 // ---- discovery (management) ----
 
 func (s *Server) handleCandidates(w http.ResponseWriter, r *http.Request) {
-	cands, err := s.connector.ListCandidates(r.Context())
+	cands, err := s.driver.ListCandidates(r.Context())
 	if err != nil {
 		writeError(w, err)
 		return
@@ -236,7 +236,7 @@ func (s *Server) handleCandidates(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOpenBluetooth(w http.ResponseWriter, r *http.Request) {
-	if err := s.connector.OpenSystemBluetoothSettings(r.Context()); err != nil {
+	if err := s.driver.OpenSystemBluetoothSettings(r.Context()); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -298,16 +298,17 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 	statuses, _ := s.manager.Statuses()
-	cands, _ := s.connector.ListCandidates(r.Context())
+	cands, _ := s.driver.ListCandidates(r.Context())
 	allowed, _ := s.configRepo.GetSetting(config.SettingAllowedOrigin)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"report":        s.diag.Report(),
-		"printers":      statuses,
-		"candidates":    cands,
-		"allowedOrigin": allowed,
+		"report":         s.diag.Report(),
+		"platform":       s.driver.Name(),
+		"printers":       statuses,
+		"candidates":     cands,
+		"allowedOrigin":  allowed,
 		"hasClientToken": s.auth.HasActiveToken(),
-		"templates":     escpos.TemplateNames(),
-		"encodings":     escpos.SupportedEncodings(),
+		"templates":      escpos.TemplateNames(),
+		"encodings":      escpos.SupportedEncodings(),
 	})
 }
 
