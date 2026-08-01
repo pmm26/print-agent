@@ -29,10 +29,13 @@ type fakeBluetoothController struct {
 	onPair  func()
 }
 
-func (f *fakeBluetoothController) StartDiscovery(context.Context) error {
+func (f *fakeBluetoothController) StartDiscovery(context.Context, config.ConnectionPreference) error {
 	f.started = true
 	return f.err
 }
+
+func (f *fakeBluetoothController) DisconnectDevice(context.Context, string) error { return f.err }
+func (f *fakeBluetoothController) ForgetDevice(context.Context, string) error     { return f.err }
 
 func (f *fakeBluetoothController) StopDiscovery(context.Context) error {
 	f.stopped = true
@@ -144,13 +147,13 @@ func TestBluetoothActionsDelegateAndNormalizeAddress(t *testing.T) {
 	controller := &fakeBluetoothController{onPair: func() { source.devices[0].Paired = true }}
 	driver := testDriver(source, &fakeProfileConnector{})
 	driver.bluetooth = controller
-	if err := driver.StartBluetoothDiscovery(context.Background()); err != nil {
+	if err := driver.StartBluetoothDiscovery(context.Background(), config.ConnectionAuto); err != nil {
 		t.Fatal(err)
 	}
 	if err := driver.StopBluetoothDiscovery(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	device, err := driver.PairBluetoothDevice(context.Background(), "aa-bb-cc-dd-ee-ff", "1234")
+	device, err := driver.PairBluetoothDevice(context.Background(), "aa-bb-cc-dd-ee-ff", "1234", config.ConnectionAuto)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +174,7 @@ func TestPairBluetoothDeviceReturnsReadyUnbondedBLEWithoutPairing(t *testing.T) 
 	driver := testDriver(source, &fakeProfileConnector{})
 	driver.bluetooth = controller
 
-	device, err := driver.PairBluetoothDevice(context.Background(), "5A:4A:95:56:6F:B6", "0000")
+	device, err := driver.PairBluetoothDevice(context.Background(), "5A:4A:95:56:6F:B6", "0000", config.ConnectionAuto)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,10 +189,10 @@ func TestPairBluetoothDeviceReturnsReadyUnbondedBLEWithoutPairing(t *testing.T) 
 func TestPairBluetoothDeviceValidatesAddressAndPresence(t *testing.T) {
 	driver := testDriver(&fakeDeviceSource{}, &fakeProfileConnector{})
 	driver.bluetooth = &fakeBluetoothController{}
-	if _, err := driver.PairBluetoothDevice(context.Background(), "bad", ""); !errors.Is(err, platform.ErrInvalidBluetoothAddress) {
+	if _, err := driver.PairBluetoothDevice(context.Background(), "bad", "", config.ConnectionAuto); !errors.Is(err, platform.ErrInvalidBluetoothAddress) {
 		t.Fatalf("invalid address error = %v", err)
 	}
-	if _, err := driver.PairBluetoothDevice(context.Background(), "AA:BB:CC:DD:EE:FF", ""); !errors.Is(err, platform.ErrBluetoothDeviceNotFound) {
+	if _, err := driver.PairBluetoothDevice(context.Background(), "AA:BB:CC:DD:EE:FF", "", config.ConnectionAuto); !errors.Is(err, platform.ErrBluetoothDeviceNotFound) {
 		t.Fatalf("missing device error = %v", err)
 	}
 }

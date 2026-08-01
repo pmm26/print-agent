@@ -22,6 +22,14 @@ const (
 	TransportMock TransportKind = "mock"
 )
 
+type ConnectionPreference string
+
+const (
+	ConnectionAuto   ConnectionPreference = "auto"
+	ConnectionRFCOMM ConnectionPreference = "rfcomm"
+	ConnectionBLE    ConnectionPreference = "ble"
+)
+
 // Parity values accepted in printer configuration.
 const (
 	ParityNone = "none"
@@ -31,22 +39,23 @@ const (
 
 // PrinterConfig is the persisted configuration for one logical printer.
 type PrinterConfig struct {
-	ID                string        `json:"id"`
-	DisplayName       string        `json:"displayName"`
-	Enabled           bool          `json:"enabled"`
-	Transport         TransportKind `json:"transport"`
-	DeviceAddress     string        `json:"deviceAddress,omitempty"`
-	Endpoint          string        `json:"endpoint"`
-	BaudRate          int           `json:"baudRate"`
-	DataBits          int           `json:"dataBits"`
-	StopBits          int           `json:"stopBits"`
-	Parity            string        `json:"parity"`
-	CharactersPerLine int           `json:"charactersPerLine"`
-	Encoding          string        `json:"encoding"`
-	AutoReconnect     bool          `json:"autoReconnect"`
-	RetiredAt         *time.Time    `json:"retiredAt,omitempty"`
-	CreatedAt         time.Time     `json:"createdAt"`
-	UpdatedAt         time.Time     `json:"updatedAt"`
+	ID                   string               `json:"id"`
+	DisplayName          string               `json:"displayName"`
+	Enabled              bool                 `json:"enabled"`
+	Transport            TransportKind        `json:"transport"`
+	DeviceAddress        string               `json:"deviceAddress,omitempty"`
+	Endpoint             string               `json:"endpoint"`
+	ConnectionPreference ConnectionPreference `json:"connectionPreference"`
+	BaudRate             int                  `json:"baudRate"`
+	DataBits             int                  `json:"dataBits"`
+	StopBits             int                  `json:"stopBits"`
+	Parity               string               `json:"parity"`
+	CharactersPerLine    int                  `json:"charactersPerLine"`
+	Encoding             string               `json:"encoding"`
+	AutoReconnect        bool                 `json:"autoReconnect"`
+	RetiredAt            *time.Time           `json:"retiredAt,omitempty"`
+	CreatedAt            time.Time            `json:"createdAt"`
+	UpdatedAt            time.Time            `json:"updatedAt"`
 }
 
 var printerIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
@@ -56,6 +65,9 @@ var printerIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 func (p *PrinterConfig) ApplyDefaults() {
 	if p.Transport == "" {
 		p.Transport = TransportBluetoothSerial
+	}
+	if p.ConnectionPreference == "" {
+		p.ConnectionPreference = ConnectionAuto
 	}
 	if p.BaudRate == 0 {
 		p.BaudRate = 9600
@@ -92,6 +104,11 @@ func (p *PrinterConfig) Validate() error {
 	}
 	if p.Transport == TransportBluetoothSerial && p.Endpoint == "" {
 		return errors.New("endpoint is required for bluetooth-serial printers")
+	}
+	switch p.ConnectionPreference {
+	case ConnectionAuto, ConnectionRFCOMM, ConnectionBLE:
+	default:
+		return fmt.Errorf("unsupported connection preference %q", p.ConnectionPreference)
 	}
 	if len(p.DisplayName) > 100 {
 		return errors.New("displayName must be at most 100 bytes")

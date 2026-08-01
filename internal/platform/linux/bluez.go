@@ -12,6 +12,7 @@ import (
 
 	"github.com/godbus/dbus/v5"
 
+	"print-agent/internal/config"
 	"print-agent/internal/platform"
 )
 
@@ -82,7 +83,7 @@ func (b *dbusBlueZ) adapterPath(ctx context.Context) (dbus.ObjectPath, error) {
 	return "", errors.New("no Bluetooth adapter found")
 }
 
-func (b *dbusBlueZ) StartDiscovery(ctx context.Context) error {
+func (b *dbusBlueZ) StartDiscovery(ctx context.Context, connectionType config.ConnectionPreference) error {
 	path, err := b.adapterPath(ctx)
 	if err != nil {
 		return err
@@ -91,12 +92,67 @@ func (b *dbusBlueZ) StartDiscovery(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	transportType := "auto"
+	if connectionType == config.ConnectionRFCOMM {
+		transportType = "bredr"
+	}
+	if connectionType == config.ConnectionBLE {
+		transportType = "le"
+	}
+	if err := conn.Object(bluezService, path).CallWithContext(ctx,
+		adapterInterface+".SetDiscoveryFilter", 0, map[string]dbus.Variant{
+			"Transport": dbus.MakeVariant(transportType),
+		}).Err; err != nil {
+		return fmt.Errorf("set Bluetooth discovery transport %s: %w", transportType, err)
+	}
 	err = conn.Object(bluezService, path).CallWithContext(
 		ctx, adapterInterface+".StartDiscovery", 0).Err
 	if err != nil && !isBlueZError(err, "org.bluez.Error.InProgress") {
 		return fmt.Errorf("start Bluetooth discovery: %w", err)
 	}
 	return nil
+}
+
+func (b *dbusBlueZ) DisconnectDevice(ctx context.Context, address string) error {
+	device, err := b.deviceByAddress(ctx, address)
+	if err != nil {
+		return fmt.Errorf("%w: %v", platform.ErrBluetoothDeviceNotFound, err)
+	}
+	conn, err := b.connection(ctx)
+	if err != nil {
+		return err
+	}
+	err = conn.Object(bluezService, device.Path).CallWithContext(ctx, deviceInterface+".Disconnect", 0).Err
+	if isBlueZError(err, "org.bluez.Error.NotConnected") {
+		return nil
+	}
+	return classifyBluetoothManagementError(err)
+}
+
+func (b *dbusBlueZ) ForgetDevice(ctx context.Context, address string) error {
+	device, err := b.deviceByAddress(ctx, address)
+	if err != nil {
+		return fmt.Errorf("%w: %v", platform.ErrBluetoothDeviceNotFound, err)
+	}
+	path, err := b.adapterPath(ctx)
+	if err != nil {
+		return err
+	}
+	conn, err := b.connection(ctx)
+	if err != nil {
+		return err
+	}
+	return classifyBluetoothManagementError(conn.Object(bluezService, path).CallWithContext(ctx, adapterInterface+".RemoveDevice", 0, device.Path).Err)
+}
+
+func classifyBluetoothManagementError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if isBlueZError(err, "org.bluez.Error.NotAuthorized") || isBlueZError(err, "org.freedesktop.DBus.Error.AccessDenied") {
+		return fmt.Errorf("%w: %v", platform.ErrBluetoothNotAuthorized, err)
+	}
+	return err
 }
 
 func (b *dbusBlueZ) StopDiscovery(ctx context.Context) error {
@@ -336,8 +392,17 @@ func (b *dbusBlueZ) ConnectGATT(ctx context.Context, address string) (gattConnec
 		return nil, err
 	}
 	if !device.Connected {
-		if err := b.connectDevice(ctx, device.Path); err != nil && !isBlueZError(err, "org.bluez.Error.AlreadyConnected") {
-			return nil, fmt.Errorf("connect BLE device %s: %w", address, err)
+		if connectErr := b.connectDevice(ctx, device.Path); connectErr != nil && !isBlueZError(connectErr, "org.bluez.Error.AlreadyConnected") {
+			// Dual-mode receipt printers can establish their LE/GATT link and
+			// resolve services, then make Device1.Connect return
+			// BREDR.ProfileUnavailable because their advertised classic SPP
+			// bearer is not usable. Trust the resulting device state instead of
+			// discarding a successful BLE connection because its classic bearer
+			// failed afterward.
+			refreshed, refreshErr := b.deviceByAddress(ctx, address)
+			if refreshErr != nil || !refreshed.Connected {
+				return nil, fmt.Errorf("connect BLE device %s: %w", address, connectErr)
+			}
 		}
 	}
 

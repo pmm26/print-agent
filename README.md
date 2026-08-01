@@ -215,9 +215,13 @@ go test ./...   # unit + integration (mock transports with scripted failures)
 go vet ./...
 ```
 
-Architecture (one worker per printer, no shared locks on the print path):
+Architecture (one worker per printer with a process-wide transmission permit):
 
 ```
 HTTP handler → JobService → SQLite tx → wake channel → printer worker
-                                          worker: claim → render ESC/POS → write (chunked, watchdog)
+                                          worker: acquire permit → claim → render ESC/POS
+                                                  → write + verify → persist → release
 ```
+
+Connections and reconnects remain independent, but at most one ESC/POS print
+attempt is active across the agent at any time.

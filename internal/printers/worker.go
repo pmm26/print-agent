@@ -27,6 +27,7 @@ type worker struct {
 	bus          *events.Bus
 	newTransport func(config.PrinterConfig) transport.Transport
 	gate         *persistenceGate
+	transmission *transmissionGate
 
 	wake         chan struct{}
 	reconnectNow chan struct{}
@@ -57,6 +58,7 @@ func newWorker(cfg config.PrinterConfig, repo *jobs.Repository, renderer *escpos
 		reconnectNow: make(chan struct{}, 1),
 		done:         make(chan struct{}),
 		state:        StateDisconnected,
+		transmission: newTransmissionGate(),
 	}
 }
 
@@ -244,11 +246,16 @@ func (w *worker) drainQueue(ctx context.Context) {
 				return
 			}
 		}
+		if err := w.transmission.acquire(ctx); err != nil {
+			return
+		}
 		run, err := w.claimNext()
 		if errors.Is(err, jobs.ErrNotFound) {
+			w.transmission.release()
 			return
 		}
 		if err != nil {
+			w.transmission.release()
 			w.bus.Publish(events.Event{Type: events.PrinterError, PrinterID: w.cfg.ID,
 				Message: "queue claim failed: " + err.Error()})
 			return
@@ -256,6 +263,7 @@ func (w *worker) drainQueue(ctx context.Context) {
 		w.bus.Publish(events.Event{Type: events.PrintRunProcessing, PrinterID: w.cfg.ID,
 			RunUID: run.UID})
 		w.process(ctx, run)
+		w.transmission.release()
 	}
 }
 

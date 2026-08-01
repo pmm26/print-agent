@@ -68,9 +68,22 @@
         <p class="muted">Scan for nearby devices, then pair each printer you want to use. You can pair more than one.</p>
       </div>
       <div class="toolbar">
+        <label>Scan type
+          <select id="scan-connection-type">
+            <option value="auto">Auto</option>
+            <option value="rfcomm">RFCOMM (Classic)</option>
+            <option value="ble">BLE</option>
+          </select>
+        </label>
         <button id="btn-scan" class="primary">Scan for devices</button>
         <button id="btn-stop-scan" disabled>Stop scan</button>
       </div>
+    </div>
+    <div class="card">
+      <h3>Ubuntu Bluetooth Settings can interfere with setup</h3>
+      <p class="muted">GNOME searches for devices while its Bluetooth panel is open. Close that panel before a protocol-specific scan, or run:</p>
+      <div class="row"><code id="ubuntu-stop-command">pkill -f '^/usr/bin/gnome-control-center bluetooth$'</code><button id="btn-copy-ubuntu-command">Copy</button></div>
+      <p class="muted">This closes only the GNOME settings panel; it does not stop BlueZ. On another Linux desktop, close its Bluetooth settings window manually. Do not stop <code>bluetooth.service</code>.</p>
     </div>
     <div id="scan-status" class="scan-status muted">Checking Bluetooth…</div>
     <div id="device-list"></div>
@@ -304,6 +317,14 @@
     <label>Encoding
       <select id="f-encoding">
         <option>CP858</option><option>CP850</option><option>CP437</option><option>CP1252</option>
+      </select>
+    </label>
+    <label>Default connection type
+      <select id="f-connection-preference" required>
+        <option value="" selected disabled>Choose a connection type…</option>
+        <option value="auto">Auto</option>
+        <option value="rfcomm">RFCOMM (Classic, recommended)</option>
+        <option value="ble">BLE</option>
       </select>
     </label>
     <label>Characters per line <input id="f-width" type="number" value="32" min="8" max="96"></label>

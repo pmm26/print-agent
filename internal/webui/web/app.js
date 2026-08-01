@@ -319,6 +319,18 @@ $("#job-dialog").addEventListener("close", () => {
 let scanning = false;
 let scanTimer;
 const pairingAddresses = new Set();
+const selectedDeviceProtocols = new Map();
+const enteredDevicePINs = new Map();
+
+async function prepareProtocolForPairing(connectionType) {
+  await stopBluetoothDiscovery(true);
+  if (connectionType === "auto") return;
+  await api(`/bluetooth/discovery/start?${new URLSearchParams({ connectionType })}`, { method: "POST" });
+  scanning = true;
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  await api("/bluetooth/discovery/stop", { method: "POST" });
+  scanning = false;
+}
 
 function setScanning(active) {
   scanning = active;
@@ -376,6 +388,11 @@ function configuredPrintersForDevice(device) {
   });
 }
 
+function activeConnectionType(status) {
+  if (!status || !["connected", "printing"].includes(status.state)) return "none";
+  return String(status.endpoint || "").split("://")[0] || "unknown";
+}
+
 function renderBluetoothDevices(devices) {
   const root = $("#device-list");
   if (!devices.length) {
@@ -393,46 +410,88 @@ function renderBluetoothDevices(devices) {
     const connected = device.connected ? `<span class="badge printing">connected</span>` : "";
     const printer = device.isPrinter ? `<span class="device-kind">🖨 Likely printer</span>` : "";
     const configuredNames = configured.map((status) => status.printer.displayName || status.printer.id).join(", ");
-    const action = configured.length
-      ? `<span class="configured-device"><span class="badge connected">added</span> ${esc(configuredNames)}</span>
-         <button data-device-act="manage" data-printer-id="${esc(configured[0].printer.id)}">View printer</button>`
-      : device.endpoint
-      ? `<button class="primary" data-device-act="add" data-endpoint="${esc(device.endpoint)}">Add printer</button>`
-      : device.paired
-        ? `<span class="muted">Paired, but no printer endpoint was found.</span>`
-        : `<input class="pin-input" data-device-pin placeholder="PIN (default 0000)" inputmode="numeric" maxlength="16">
-           <button class="primary" data-device-act="pair" ${busy ? "disabled" : ""}>${busy ? "Pairing…" : "Pair device"}</button>`;
+    const activeTypes = [...new Set(configured.map(activeConnectionType).filter((type) => type !== "none"))];
+    const supported = device.supportedConnectionTypes || [];
+    const selectedProtocol = selectedDeviceProtocols.get(device.address) || "";
+    const enteredPIN = enteredDevicePINs.get(device.address) || "";
+    const protocolOptions = [
+      ["", "Choose protocol…"], ["auto", "Auto"], ["rfcomm", "RFCOMM (Classic)"], ["ble", "BLE"],
+    ].map(([value, label]) => `<option value="${value}" ${value === selectedProtocol ? "selected" : ""} ${value && value !== "auto" && !supported.includes(value) ? "disabled" : ""}>${label}</option>`).join("");
+    const actions = [];
+    if (configured.length) {
+      actions.push(`<span class="configured-device"><span class="badge connected">added</span> ${esc(configuredNames)}</span>`);
+      actions.push(`<button data-device-act="manage" data-printer-id="${esc(configured[0].printer.id)}">View printer</button>`);
+    } else {
+      if (!device.paired) actions.push(`<select data-device-protocol required>${protocolOptions}</select>
+        <input class="pin-input" data-device-pin value="${esc(enteredPIN)}" placeholder="PIN if required" inputmode="numeric" maxlength="16">
+        <button class="primary" data-device-act="pair" ${busy ? "disabled" : ""}>${busy ? "Pairing…" : "Pair"}</button>`);
+      if (device.endpoint) actions.push(`<button class="primary" data-device-act="add" data-endpoint="${esc(device.endpoint)}">Add printer</button>`);
+      if (device.paired) actions.push(`<button class="danger" data-device-act="forget">Forget</button>`);
+    }
+    if (device.connected) actions.push(`<button data-device-act="disconnect">Disconnect now</button>`);
+    const action = actions.join("");
     return `<div class="card device" data-address="${esc(device.address)}">
       <div class="device-info">
         <h2>${esc(device.name || "Unknown device")} ${state} ${connected}</h2>
-        <div class="meta">${esc(device.address)} ${printer}</div>
+        <div class="meta">${esc(device.address)} ${printer}${activeTypes.length ? ` · active: <b>${esc(activeTypes.join(", "))}</b>` : ""}</div>
       </div>
       <div class="device-actions">${action}</div>
     </div>`;
   }).join("");
+
+  root.querySelectorAll("select[data-device-protocol]").forEach((select) => {
+    select.addEventListener("change", () => {
+      selectedDeviceProtocols.set(select.closest(".device").dataset.address, select.value);
+    });
+  });
+  root.querySelectorAll("input[data-device-pin]").forEach((input) => {
+    input.addEventListener("input", () => {
+      enteredDevicePINs.set(input.closest(".device").dataset.address, input.value);
+    });
+  });
 
   root.querySelectorAll("button[data-device-act=pair]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const card = btn.closest(".device");
       const address = card.dataset.address;
       const pin = card.querySelector("[data-device-pin]").value.trim();
+      const connectionType = card.querySelector("[data-device-protocol]").value;
+      if (!connectionType) { toast("Choose Auto, RFCOMM, or BLE before pairing", true); return; }
       pairingAddresses.add(address);
       renderBluetoothDevices(devices);
-      await stopBluetoothDiscovery(true);
       try {
+        await prepareProtocolForPairing(connectionType);
         const result = await api(`/bluetooth/devices/${encodeURIComponent(address)}/pair`, {
           method: "POST",
-          body: JSON.stringify({ pin }),
+          body: JSON.stringify({ pin, connectionType }),
         });
         toast(result.ready
           ? `${address} is ready. You can add it as a printer.`
           : `Paired ${address}, but no supported printer endpoint was found.`);
+        selectedDeviceProtocols.delete(address);
+        enteredDevicePINs.delete(address);
       } catch (e) {
         toast(e.message, true);
       } finally {
         pairingAddresses.delete(address);
         refreshBluetoothDevices();
       }
+    });
+  });
+  root.querySelectorAll("button[data-device-act=disconnect]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const address = btn.closest(".device").dataset.address;
+      if (!confirm("Disconnect this device now? Auto-reconnect may connect it again immediately.")) return;
+      await call(() => api(`/bluetooth/devices/${encodeURIComponent(address)}/disconnect`, { method: "POST" }), `Disconnected ${address}`);
+      refreshBluetoothDevices();
+    });
+  });
+  root.querySelectorAll("button[data-device-act=forget]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const address = btn.closest(".device").dataset.address;
+      if (!confirm(`Forget ${address}? It will need to be paired again.`)) return;
+      await call(() => api(`/bluetooth/devices/${encodeURIComponent(address)}`, { method: "DELETE" }), `Forgot ${address}`);
+      refreshBluetoothDevices();
     });
   });
   root.querySelectorAll("button[data-device-act=add]").forEach((btn) => {
@@ -451,7 +510,8 @@ function renderBluetoothDevices(devices) {
 async function startBluetoothDiscovery() {
   clearTimeout(scanTimer);
   try {
-    await api("/bluetooth/discovery/start", { method: "POST" });
+    const connectionType = $("#scan-connection-type").value || "auto";
+    await api(`/bluetooth/discovery/start?${new URLSearchParams({ connectionType })}`, { method: "POST" });
     setScanning(true);
     await refreshBluetoothDevices();
     scanTimer = setTimeout(() => stopBluetoothDiscovery(), 20000);
@@ -476,6 +536,10 @@ async function stopBluetoothDiscovery(silent = false) {
 
 $("#btn-scan").addEventListener("click", startBluetoothDiscovery);
 $("#btn-stop-scan").addEventListener("click", () => stopBluetoothDiscovery());
+$("#btn-copy-ubuntu-command").addEventListener("click", async () => {
+  await navigator.clipboard.writeText($("#ubuntu-stop-command").textContent);
+  toast("Ubuntu command copied");
+});
 
 // ---- printers ----
 async function refreshStatus() {
@@ -525,7 +589,7 @@ function renderPrinters(list) {
     return `<div class="card printer" data-id="${esc(p.id)}" role="button" tabindex="0" aria-label="Open ${esc(p.displayName)} details">
       <div>
         <h2>${esc(p.displayName)} <span class="badge ${esc(st.state)}">${esc(st.state)}</span></h2>
-        <div class="meta"><b>${esc(st.endpoint || "no endpoint")}</b> · queue: <b>${st.queueDepth}</b> ·
+        <div class="meta"><b>${esc(st.endpoint || "no endpoint")}</b> · active: <b>${esc(activeConnectionType(st))}</b> · queue: <b>${st.queueDepth}</b> ·
           last transmission: ${fmtTime(st.lastTransmission)}${retry} ${attn}</div>
         ${st.lastError ? `<div class="error">${esc(st.lastError)}</div>` : ""}
       </div>
@@ -597,6 +661,8 @@ function renderPrinterDetailOverview(status) {
     ["Connection", status.state],
     ["Enabled", printer.enabled ? "Yes" : "No"],
     ["Endpoint", status.endpoint || printer.endpoint || "—"],
+    ["Active connection type", activeConnectionType(status)],
+    ["Default connection type", printer.connectionPreference || "auto"],
     ["Device address", printer.deviceAddress || "—"],
     ["Transport", printer.transport || "—"],
     ["Queue depth", status.queueDepth],
@@ -790,6 +856,7 @@ function openDialog(printer, selectedEndpoint = "") {
   $("#f-name").value = printer?.displayName || "";
   $("#f-encoding").value = printer?.encoding || "CP858";
   $("#f-width").value = printer?.charactersPerLine || 32;
+  $("#f-connection-preference").value = printer?.connectionPreference || "";
   loadCandidates(printer?.endpoint || selectedEndpoint);
   $("#printer-dialog").showModal();
 }
@@ -807,6 +874,7 @@ $("#printer-form").addEventListener("submit", (ev) => {
     deviceAddress: endpointSel.selectedOptions[0]?.dataset.addr || "",
     encoding: $("#f-encoding").value,
     charactersPerLine: parseInt($("#f-width").value, 10) || 32,
+    connectionPreference: $("#f-connection-preference").value,
   };
   const req = editingID
     ? api(`/printers/${editingID}`, { method: "PUT", body: JSON.stringify(body) })

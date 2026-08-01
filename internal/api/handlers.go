@@ -183,19 +183,20 @@ func (s *Server) handleListPrinters(w http.ResponseWriter, r *http.Request) {
 
 // printerRequest uses pointers so updates preserve every omitted field.
 type printerRequest struct {
-	ID                *string               `json:"id"`
-	DisplayName       *string               `json:"displayName"`
-	Enabled           *bool                 `json:"enabled"`
-	Transport         *config.TransportKind `json:"transport"`
-	DeviceAddress     *string               `json:"deviceAddress"`
-	Endpoint          *string               `json:"endpoint"`
-	BaudRate          *int                  `json:"baudRate"`
-	DataBits          *int                  `json:"dataBits"`
-	StopBits          *int                  `json:"stopBits"`
-	Parity            *string               `json:"parity"`
-	CharactersPerLine *int                  `json:"charactersPerLine"`
-	Encoding          *string               `json:"encoding"`
-	AutoReconnect     *bool                 `json:"autoReconnect"`
+	ID                   *string                      `json:"id"`
+	DisplayName          *string                      `json:"displayName"`
+	Enabled              *bool                        `json:"enabled"`
+	Transport            *config.TransportKind        `json:"transport"`
+	DeviceAddress        *string                      `json:"deviceAddress"`
+	Endpoint             *string                      `json:"endpoint"`
+	BaudRate             *int                         `json:"baudRate"`
+	DataBits             *int                         `json:"dataBits"`
+	StopBits             *int                         `json:"stopBits"`
+	Parity               *string                      `json:"parity"`
+	CharactersPerLine    *int                         `json:"charactersPerLine"`
+	Encoding             *string                      `json:"encoding"`
+	AutoReconnect        *bool                        `json:"autoReconnect"`
+	ConnectionPreference *config.ConnectionPreference `json:"connectionPreference"`
 }
 
 func decodePrinterRequest(r *http.Request) (printerRequest, error) {
@@ -248,6 +249,9 @@ func (s *Server) mergePrinter(req printerRequest, cfg config.PrinterConfig, exis
 	}
 	if req.AutoReconnect != nil {
 		cfg.AutoReconnect = *req.AutoReconnect
+	}
+	if req.ConnectionPreference != nil {
+		cfg.ConnectionPreference = *req.ConnectionPreference
 	}
 	if existingID != "" {
 		cfg.ID = existingID
@@ -401,7 +405,15 @@ func (s *Server) handleStartBluetoothDiscovery(w http.ResponseWriter, r *http.Re
 		writeJSON(w, http.StatusNotImplemented, errorResponse{Code: "not_supported", Error: "in-app Bluetooth discovery is not supported on this platform"})
 		return
 	}
-	if err := pairer.StartBluetoothDiscovery(r.Context()); err != nil {
+	preference := config.ConnectionPreference(r.URL.Query().Get("connectionType"))
+	if preference == "" {
+		preference = config.ConnectionAuto
+	}
+	if preference != config.ConnectionAuto && preference != config.ConnectionRFCOMM && preference != config.ConnectionBLE {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Code: "invalid_connection_type", Error: "connectionType must be auto, rfcomm, or ble"})
+		return
+	}
+	if err := pairer.StartBluetoothDiscovery(r.Context(), preference); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -428,14 +440,22 @@ func (s *Server) handlePairBluetoothDevice(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var body struct {
-		PIN string `json:"pin"`
+		PIN            string                      `json:"pin"`
+		ConnectionType config.ConnectionPreference `json:"connectionType"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, errorResponse{Code: "invalid_json", Error: err.Error()})
 		return
 	}
+	if body.ConnectionType == "" {
+		body.ConnectionType = config.ConnectionAuto
+	}
+	if body.ConnectionType != config.ConnectionAuto && body.ConnectionType != config.ConnectionRFCOMM && body.ConnectionType != config.ConnectionBLE {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Code: "invalid_connection_type", Error: "connectionType must be auto, rfcomm, or ble"})
+		return
+	}
 	address := r.PathValue("address")
-	device, err := pairer.PairBluetoothDevice(r.Context(), address, body.PIN)
+	device, err := pairer.PairBluetoothDevice(r.Context(), address, body.PIN, body.ConnectionType)
 	if err != nil {
 		s.writeBluetoothError(w, address, err)
 		return
@@ -444,6 +464,64 @@ func (s *Server) handlePairBluetoothDevice(w http.ResponseWriter, r *http.Reques
 		"ready":  device.Endpoint != "",
 		"device": device,
 	})
+}
+
+func (s *Server) configuredPrinterForAddress(address string) (string, error) {
+	statuses, err := s.manager.Statuses()
+	if err != nil {
+		return "", err
+	}
+	wanted := strings.ToUpper(strings.ReplaceAll(address, "-", ":"))
+	for _, status := range statuses {
+		candidate := status.Printer.DeviceAddress
+		if candidate == "" {
+			parts := strings.SplitN(status.Printer.Endpoint, "://", 2)
+			if len(parts) == 2 {
+				candidate = parts[1]
+			}
+		}
+		if strings.ToUpper(strings.ReplaceAll(candidate, "-", ":")) == wanted {
+			return status.Printer.ID, nil
+		}
+	}
+	return "", nil
+}
+
+func (s *Server) handleDisconnectBluetoothDevice(w http.ResponseWriter, r *http.Request) {
+	pairer, supported := s.bluetoothPairer()
+	if !supported {
+		writeJSON(w, http.StatusNotImplemented, errorResponse{Code: "not_supported", Error: "Bluetooth management is not supported"})
+		return
+	}
+	address := r.PathValue("address")
+	if err := pairer.DisconnectBluetoothDevice(r.Context(), address); err != nil {
+		s.writeBluetoothManagementError(w, address, "disconnect", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"disconnected": true})
+}
+
+func (s *Server) handleForgetBluetoothDevice(w http.ResponseWriter, r *http.Request) {
+	pairer, supported := s.bluetoothPairer()
+	if !supported {
+		writeJSON(w, http.StatusNotImplemented, errorResponse{Code: "not_supported", Error: "Bluetooth management is not supported"})
+		return
+	}
+	address := r.PathValue("address")
+	printerID, err := s.configuredPrinterForAddress(address)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if printerID != "" {
+		writeJSON(w, http.StatusConflict, errorResponse{Code: "device_in_use", Error: fmt.Sprintf("remove printer %s before forgetting this Bluetooth device", printerID)})
+		return
+	}
+	if err := pairer.ForgetBluetoothDevice(r.Context(), address); err != nil {
+		s.writeBluetoothManagementError(w, address, "forget", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"forgotten": true})
 }
 
 func (s *Server) handleOpenBluetooth(w http.ResponseWriter, r *http.Request) {

@@ -91,6 +91,23 @@ func TestPrinterDetailModalWiring(t *testing.T) {
 	}
 }
 
+func TestLinuxBluetoothManagementWiring(t *testing.T) {
+	index, _ := webFiles.ReadFile("web/index.html")
+	app, _ := webFiles.ReadFile("web/app.js")
+	for _, expected := range []string{`id="scan-connection-type"`, `id="ubuntu-stop-command"`,
+		`pkill -f '^/usr/bin/gnome-control-center bluetooth$'`, `id="f-connection-preference"`} {
+		if !strings.Contains(string(index), expected) {
+			t.Fatalf("index missing %s", expected)
+		}
+	}
+	for _, expected := range []string{`data-device-act="disconnect"`, `data-device-act="forget"`,
+		`connectionPreference:`, `function activeConnectionType(`, `selectedDeviceProtocols`, `enteredDevicePINs`} {
+		if !strings.Contains(string(app), expected) {
+			t.Fatalf("app missing %s", expected)
+		}
+	}
+}
+
 func TestJobModalRefreshPreservesDialogState(t *testing.T) {
 	app, err := webFiles.ReadFile("web/app.js")
 	if err != nil {

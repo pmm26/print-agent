@@ -101,6 +101,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/bluetooth/discovery/start", admin(s.handleStartBluetoothDiscovery))
 	mux.Handle("POST /api/v1/bluetooth/discovery/stop", admin(s.handleStopBluetoothDiscovery))
 	mux.Handle("POST /api/v1/bluetooth/devices/{address}/pair", admin(s.handlePairBluetoothDevice))
+	mux.Handle("POST /api/v1/bluetooth/devices/{address}/disconnect", admin(s.handleDisconnectBluetoothDevice))
+	mux.Handle("DELETE /api/v1/bluetooth/devices/{address}", admin(s.handleForgetBluetoothDevice))
 	mux.Handle("POST /api/v1/system/open-bluetooth-settings", admin(s.handleOpenBluetooth))
 	mux.Handle("GET /api/v1/printers/{printerID}/queue", admin(s.handlePrinterQueue))
 	mux.Handle("POST /api/v1/print-runs/{runUID}/confirm-printed", admin(s.handleConfirmPrinted))
@@ -230,7 +232,25 @@ func (s *Server) writeBluetoothError(w http.ResponseWriter, address string, err 
 		writeJSON(w, http.StatusGatewayTimeout, errorResponse{Code: "pairing_timeout", Error: "pairing timed out; put the printer in pairing mode and try again"})
 	case errors.Is(err, platform.ErrBluetoothUnavailable):
 		writeJSON(w, http.StatusServiceUnavailable, errorResponse{Code: "bluetooth_unavailable", Error: "Bluetooth is unavailable; check that the adapter is powered on"})
+	case errors.Is(err, platform.ErrBluetoothNotAuthorized):
+		writeJSON(w, http.StatusForbidden, errorResponse{Code: "bluetooth_not_authorized", Error: "this session is not authorized to manage Bluetooth; use bluetoothctl or the system Bluetooth settings"})
+	case errors.Is(err, platform.ErrBluetoothProtocolUnsupported):
+		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Code: "connection_type_unsupported", Error: err.Error()})
 	default:
 		writeJSON(w, http.StatusBadGateway, errorResponse{Code: "bluetooth_error", Error: "BlueZ could not pair the device; check the agent log for details"})
+	}
+}
+
+func (s *Server) writeBluetoothManagementError(w http.ResponseWriter, address, action string, err error) {
+	s.log.Error("Bluetooth management failed", "action", action, "address", address, "error", err)
+	switch {
+	case errors.Is(err, platform.ErrInvalidBluetoothAddress):
+		writeJSON(w, http.StatusBadRequest, errorResponse{Code: "invalid_address", Error: "invalid Bluetooth device address"})
+	case errors.Is(err, platform.ErrBluetoothDeviceNotFound):
+		writeJSON(w, http.StatusNotFound, errorResponse{Code: "bluetooth_device_not_found", Error: "Bluetooth device is no longer available; scan again"})
+	case errors.Is(err, platform.ErrBluetoothNotAuthorized):
+		writeJSON(w, http.StatusForbidden, errorResponse{Code: "bluetooth_not_authorized", Error: "this session is not authorized to manage Bluetooth; use bluetoothctl or the system Bluetooth settings"})
+	default:
+		writeJSON(w, http.StatusBadGateway, errorResponse{Code: "bluetooth_error", Error: fmt.Sprintf("BlueZ could not %s the device; check the agent log for details", action)})
 	}
 }

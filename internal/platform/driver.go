@@ -23,13 +23,15 @@ var ErrNotConnected = errors.New("device is paired but not connected")
 // Bluetooth management errors let the local API return useful, stable error
 // codes without exposing BlueZ's implementation-specific D-Bus messages.
 var (
-	ErrInvalidBluetoothAddress = errors.New("invalid Bluetooth address")
-	ErrBluetoothDeviceNotFound = errors.New("Bluetooth device not found")
-	ErrBluetoothUnavailable    = errors.New("Bluetooth is unavailable")
-	ErrBluetoothPairInProgress = errors.New("Bluetooth pairing is already in progress")
-	ErrBluetoothPairRejected   = errors.New("Bluetooth pairing was rejected")
-	ErrBluetoothPairTimeout    = errors.New("Bluetooth pairing timed out")
-	ErrBluetoothPairFailed     = errors.New("Bluetooth pairing failed")
+	ErrInvalidBluetoothAddress      = errors.New("invalid Bluetooth address")
+	ErrBluetoothDeviceNotFound      = errors.New("Bluetooth device not found")
+	ErrBluetoothUnavailable         = errors.New("Bluetooth is unavailable")
+	ErrBluetoothPairInProgress      = errors.New("Bluetooth pairing is already in progress")
+	ErrBluetoothPairRejected        = errors.New("Bluetooth pairing was rejected")
+	ErrBluetoothPairTimeout         = errors.New("Bluetooth pairing timed out")
+	ErrBluetoothPairFailed          = errors.New("Bluetooth pairing failed")
+	ErrBluetoothNotAuthorized       = errors.New("Bluetooth management is not authorized")
+	ErrBluetoothProtocolUnsupported = errors.New("Bluetooth connection type is not supported")
 )
 
 type LinkState string
@@ -66,12 +68,13 @@ type Candidate struct {
 // Candidate it may not be paired yet and therefore may not have a usable
 // printer endpoint.
 type BluetoothDevice struct {
-	Name      string `json:"name,omitempty"`
-	Address   string `json:"address"`
-	Paired    bool   `json:"paired"`
-	Connected bool   `json:"connected"`
-	IsPrinter bool   `json:"isPrinter"`
-	Endpoint  string `json:"endpoint,omitempty"`
+	Name                     string                        `json:"name,omitempty"`
+	Address                  string                        `json:"address"`
+	Paired                   bool                          `json:"paired"`
+	Connected                bool                          `json:"connected"`
+	IsPrinter                bool                          `json:"isPrinter"`
+	Endpoint                 string                        `json:"endpoint,omitempty"`
+	SupportedConnectionTypes []config.ConnectionPreference `json:"supportedConnectionTypes,omitempty"`
 }
 
 // BluetoothPairer is an optional capability implemented by platforms which
@@ -79,9 +82,11 @@ type BluetoothDevice struct {
 // Linux implements this through BlueZ; callers must feature-detect it.
 type BluetoothPairer interface {
 	ListBluetoothDevices(ctx context.Context) ([]BluetoothDevice, error)
-	StartBluetoothDiscovery(ctx context.Context) error
+	StartBluetoothDiscovery(ctx context.Context, connectionType config.ConnectionPreference) error
 	StopBluetoothDiscovery(ctx context.Context) error
-	PairBluetoothDevice(ctx context.Context, address, pin string) (BluetoothDevice, error)
+	PairBluetoothDevice(ctx context.Context, address, pin string, connectionType config.ConnectionPreference) (BluetoothDevice, error)
+	DisconnectBluetoothDevice(ctx context.Context, address string) error
+	ForgetBluetoothDevice(ctx context.Context, address string) error
 }
 
 // Driver is one platform's implementation of Bluetooth-printer plumbing.
