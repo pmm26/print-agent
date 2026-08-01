@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>POS Simulator — Print Agent</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; color: #1c2330; }
+  fieldset { border: 1px solid #ccc; border-radius: 10px; margin-bottom: 18px; padding: 14px 18px; }
+  legend { font-weight: 600; }
+  input, button, textarea { font: inherit; padding: 6px 10px; margin: 2px 0; }
+  input { border: 1px solid #bbb; border-radius: 6px; }
+  button { border: 1px solid #888; border-radius: 6px; background: #f2f2f2; cursor: pointer; }
+  pre { background: #f5f5f5; padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 13px; }
+  .ok { color: #16a34a; } .err { color: #dc2626; }
+</style>
+</head>
+<body>
+<h1>POS Simulator</h1>
+<p>Serve this page from the origin configured as <em>Allowed POS origin</em> in the agent dashboard.
+For the Chrome Local Network Access prompt to appear, the origin must be HTTPS (e.g. via
+<code>npx serve</code> behind a tunnel, or <code>mkcert</code> + any static server).
+Current origin: <code id="origin"></code></p>
+
+<fieldset>
+  <legend>1 · Agent</legend>
+  <label>Agent URL <input id="agent-url" value="http://127.0.0.1:17432" size="30"></label>
+  <button id="btn-health">Check health</button>
+  <span id="health-result"></span>
+</fieldset>
+
+<fieldset>
+  <legend>2 · Pair (once per installation)</legend>
+  <p>Generate a pairing code in the agent dashboard (POS Pairing tab), enter it here.</p>
+  <label>Code <input id="pair-code" size="8" maxlength="6" placeholder="123456"></label>
+  <button id="btn-pair">Pair</button>
+  <div>Token: <code id="token-display">none</code></div>
+</fieldset>
+
+<fieldset>
+  <legend>3 · Submit a print job</legend>
+  <label>Order number <input id="order-no" value="1256" size="8"></label>
+  <label>Printer ID <input id="printer-id" value="cashier" size="12"></label>
+  <button id="btn-print">Print receipt</button>
+  <button id="btn-print-dup">Send same job again (idempotency test)</button>
+</fieldset>
+
+<fieldset>
+  <legend>4 · Poll status</legend>
+  <button id="btn-status">Get /status</button>
+</fieldset>
+
+<pre id="log">—</pre>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+$("#origin").textContent = location.origin;
+const tokenKey = "print-agent-token";
+$("#token-display").textContent = localStorage.getItem(tokenKey) ? "(stored)" : "none";
+
+let lastJobId = null;
+const log = (label, data, isErr) => {
+  $("#log").innerHTML = `<span class="${isErr ? "err" : "ok"}">${label}</span>\n` +
+    (typeof data === "string" ? data : JSON.stringify(data, null, 2));
+};
+
+async function agentFetch(path, opts = {}) {
+  const base = $("#agent-url").value.replace(/\/$/, "");
+  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  const token = localStorage.getItem(tokenKey);
+  if (token) headers["Authorization"] = "Bearer " + token;
+  const res = await fetch(base + path, { ...opts, headers });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(`${res.status}: ${body?.error || res.statusText}`);
+  return body;
+}
+
+$("#btn-health").onclick = async () => {
+  try {
+    await agentFetch("/api/v1/health");
+    $("#health-result").innerHTML = '<span class="ok">reachable ✓</span>';
+  } catch (e) {
+    $("#health-result").innerHTML = `<span class="err">${e.message}</span>`;
+  }
+};
+
+$("#btn-pair").onclick = async () => {
+  try {
+    const res = await agentFetch("/api/v1/pair", {
+      method: "POST",
+      body: JSON.stringify({ code: $("#pair-code").value.trim(), label: "pos-sim " + location.origin }),
+    });
+    localStorage.setItem(tokenKey, res.token);
+    $("#token-display").textContent = "(stored)";
+    log("paired", "token stored in localStorage");
+  } catch (e) { log("pair failed", e.message, true); }
+};
+
+function buildJob(orderNo, printerId) {
+  const jobId = `pos-sim:order-${orderNo}`;
+  return {
+    jobId,
+    documents: [{
+      deliveryId: `${jobId}:${printerId}`,
+      printerId,
+      template: "customer-receipt",
+      data: {
+        storeName: "POS Simulator",
+        orderNumber: String(orderNo),
+        createdAt: new Date().toISOString(),
+        items: [
+          { name: "Tortilla española", quantity: 2, priceCents: 1250 },
+          { name: "Café con leche", quantity: 1, priceCents: 180, notes: "sin azúcar" },
+        ],
+        totalCents: 2680,
+        paymentMethod: "cash",
+      },
+    }],
+  };
+}
+
+async function submit(job) {
+  try {
+    const res = await agentFetch("/api/v1/jobs", {
+      method: "POST",
+      headers: { "Idempotency-Key": job.jobId },
+      body: JSON.stringify(job),
+    });
+    log(res.duplicate ? "duplicate — not reprinted" : "accepted", res);
+  } catch (e) { log("submit failed", e.message, true); }
+}
+
+$("#btn-print").onclick = () => {
+  const job = buildJob($("#order-no").value, $("#printer-id").value);
+  lastJobId = job.jobId;
+  submit(job);
+};
+$("#btn-print-dup").onclick = () => {
+  if (!lastJobId) return log("no job sent yet", "", true);
+  submit(buildJob($("#order-no").value, $("#printer-id").value));
+};
+$("#btn-status").onclick = async () => {
+  try { log("status", await agentFetch("/api/v1/status")); }
+  catch (e) { log("status failed", e.message, true); }
+};
+</script>
+</body>
+</html>

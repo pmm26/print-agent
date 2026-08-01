@@ -1,0 +1,60 @@
+:root {
+  --bg: #f5f6f8; --card: #fff; --text: #1c2330; --muted: #67707f;
+  --border: #dde1e7; --accent: #2563eb; --ok: #16a34a; --warn: #d97706; --bad: #dc2626;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #12151a; --card: #1b2028; --text: #e8ebf0; --muted: #98a1ae; --border: #2b323d; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); }
+header { padding: 14px 22px 0; border-bottom: 1px solid var(--border); background: var(--card); }
+h1 { font-size: 20px; margin: 0 0 10px; }
+h2 { font-size: 16px; margin: 0 0 8px; }
+nav { display: flex; gap: 4px; }
+.tab { border: none; background: none; padding: 8px 14px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; font-size: 14px; }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+main { padding: 20px 22px; max-width: 1100px; margin: 0 auto; }
+.hidden { display: none !important; }
+.toolbar { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+button { font: inherit; padding: 7px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--text); cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+button.danger { color: var(--bad); }
+input, select { font: inherit; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--card); color: var(--text); }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin-bottom: 14px; }
+.muted { color: var(--muted); font-size: 13px; }
+.row { display: flex; gap: 8px; align-items: center; }
+.row.right { justify-content: flex-end; margin-top: 14px; }
+
+.badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; vertical-align: middle; }
+.badge.connected, .badge.running { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+.badge.printing { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+.badge.connecting, .badge.reconnecting { background: color-mix(in srgb, var(--warn) 15%, transparent); color: var(--warn); }
+.badge.disconnected, .badge.error { background: color-mix(in srgb, var(--bad) 15%, transparent); color: var(--bad); }
+.badge.disabled { background: color-mix(in srgb, var(--muted) 15%, transparent); color: var(--muted); }
+
+.printer { display: flex; justify-content: space-between; align-items: flex-start; gap: 14px; }
+.printer h2 { display: flex; gap: 10px; align-items: center; }
+.printer .meta { font-size: 13px; color: var(--muted); }
+.printer .meta b { color: var(--text); font-weight: 600; }
+.printer .error { color: var(--bad); font-size: 13px; margin-top: 4px; }
+.printer .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.attn { color: var(--warn); font-weight: 600; }
+
+table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+th { color: var(--muted); font-weight: 600; }
+td .badge { font-size: 11px; }
+code { background: color-mix(in srgb, var(--muted) 12%, transparent); padding: 1px 5px; border-radius: 4px; }
+
+.paircode { font-size: 42px; font-weight: 700; letter-spacing: 8px; text-align: center; padding: 18px; margin-top: 12px; background: var(--bg); border-radius: 12px; }
+pre { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px; overflow-x: auto; font-size: 12.5px; }
+
+dialog { border: 1px solid var(--border); border-radius: 14px; background: var(--card); color: var(--text); padding: 22px; min-width: 380px; }
+dialog::backdrop { background: rgba(0,0,0,.45); }
+dialog label { display: block; margin: 12px 0 0; font-size: 13px; color: var(--muted); }
+dialog input, dialog select { width: 100%; margin-top: 4px; }
+dialog .row select { flex: 1; }
+dialog .row button { flex: 0; }
+
+#toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 18px; border-radius: 10px; font-size: 14px; z-index: 10; }

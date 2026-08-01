@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Print Agent</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+  <h1>🖨 Print Agent <span id="agent-state" class="badge">…</span></h1>
+  <nav>
+    <button data-tab="printers" class="tab active">Printers</button>
+    <button data-tab="queue" class="tab">Queue</button>
+    <button data-tab="pairing" class="tab">POS Pairing</button>
+    <button data-tab="diagnostics" class="tab">Diagnostics</button>
+    <button data-tab="logs" class="tab">Logs</button>
+  </nav>
+</header>
+
+<main>
+  <section id="tab-printers" class="panel">
+    <div class="toolbar">
+      <button id="btn-add">＋ Add printer</button>
+      <button id="btn-reconnect-all">Reconnect all</button>
+      <button id="btn-open-bt">Open Bluetooth settings</button>
+    </div>
+    <div id="printer-list"></div>
+  </section>
+
+  <section id="tab-queue" class="panel hidden">
+    <div class="toolbar">
+      <select id="queue-filter">
+        <option value="">All statuses</option>
+        <option value="queued">queued</option>
+        <option value="processing">processing</option>
+        <option value="transmitted">transmitted</option>
+        <option value="failed">failed</option>
+        <option value="uncertain">uncertain</option>
+        <option value="cancelled">cancelled</option>
+      </select>
+      <button id="btn-queue-refresh">Refresh</button>
+    </div>
+    <table id="queue-table">
+      <thead><tr><th>Delivery</th><th>Printer</th><th>Template</th><th>Status</th><th>Attempts</th><th>Error</th><th>Actions</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="tab-pairing" class="panel hidden">
+    <div class="card">
+      <h2>Allowed POS origin</h2>
+      <p class="muted">Exact origin of the hosted POS page, e.g. <code>https://pos.example.com</code></p>
+      <div class="row">
+        <input id="allowed-origin" placeholder="https://…" size="40">
+        <button id="btn-save-origin">Save</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Pairing code</h2>
+      <p class="muted">Generate a one-time code and enter it in the POS setup screen within 5 minutes.</p>
+      <button id="btn-pairing-code">Generate pairing code</button>
+      <div id="pairing-code" class="paircode hidden"></div>
+    </div>
+    <div class="card">
+      <h2>Client tokens</h2>
+      <table id="token-table">
+        <thead><tr><th>Label</th><th>Origin</th><th>Created</th><th>Last used</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="tab-diagnostics" class="panel hidden">
+    <div class="toolbar">
+      <button id="btn-diag-refresh">Refresh</button>
+      <a href="/api/v1/diagnostics/export"><button>Export diagnostics (.zip)</button></a>
+    </div>
+    <pre id="diag-body">…</pre>
+  </section>
+
+  <section id="tab-logs" class="panel hidden">
+    <div class="toolbar"><button id="btn-logs-refresh">Refresh</button></div>
+    <table id="log-table">
+      <thead><tr><th>Time</th><th>Event</th><th>Printer</th><th>Delivery</th><th>Message</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+
+<dialog id="printer-dialog">
+  <form id="printer-form" method="dialog">
+    <h2 id="dialog-title">Add printer</h2>
+    <p class="muted">Pair the printer in the operating system's Bluetooth settings first, then pick its endpoint below.</p>
+    <label>Endpoint
+      <div class="row">
+        <select id="f-endpoint"></select>
+        <button type="button" id="btn-refresh-candidates">↻</button>
+      </div>
+    </label>
+    <label>Printer ID <input id="f-id" pattern="[a-z0-9][a-z0-9_-]*" placeholder="kitchen" required></label>
+    <label>Display name <input id="f-name" placeholder="Kitchen"></label>
+    <label>Encoding
+      <select id="f-encoding">
+        <option>CP858</option><option>CP850</option><option>CP437</option><option>CP1252</option>
+      </select>
+    </label>
+    <label>Characters per line <input id="f-width" type="number" value="32" min="8" max="96"></label>
+    <div class="row right">
+      <button type="button" id="btn-dialog-cancel">Cancel</button>
+      <button type="submit" class="primary">Save &amp; connect</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>
