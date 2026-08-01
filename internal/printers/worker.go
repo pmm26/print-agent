@@ -126,7 +126,14 @@ func (w *worker) connectLoop(ctx context.Context) bool {
 	alreadyConnected := w.tr != nil && w.state == StateConnected
 	w.mu.Unlock()
 	if alreadyConnected {
-		return true
+		// The endpoint being open proves little on macOS; confirm the OS
+		// still reports the Bluetooth link up.
+		if err := w.connector.VerifyConnected(ctx, w.cfg); err == nil {
+			return true
+		}
+		w.closeTransport(StateDisconnected, "bluetooth link lost")
+		w.bus.Publish(events.Event{Type: events.PrinterDisconnected, PrinterID: w.cfg.ID,
+			Message: "OS reports the printer disconnected"})
 	}
 	attempt := 0
 	for ctx.Err() == nil {
@@ -201,6 +208,21 @@ func (w *worker) connectOnce(ctx context.Context) error {
 	if err := tr.Connect(ctx); err != nil {
 		return err
 	}
+	// Opening the endpoint succeeds on macOS even when the printer is off.
+	// Confirm the OS-level Bluetooth link; the open may itself trigger the
+	// link to come up, so allow one short grace retry.
+	if err := w.connector.VerifyConnected(ctx, cfg); err != nil {
+		select {
+		case <-time.After(4 * time.Second): // outlive the connector's state cache
+		case <-ctx.Done():
+			tr.Close()
+			return ctx.Err()
+		}
+		if err := w.connector.VerifyConnected(ctx, cfg); err != nil {
+			tr.Close()
+			return fmt.Errorf("endpoint %s opened but %w — is the printer on?", cfg.Endpoint, err)
+		}
+	}
 	w.mu.Lock()
 	w.tr = tr
 	w.mu.Unlock()
@@ -245,6 +267,19 @@ func (w *worker) process(ctx context.Context, d jobs.Delivery) {
 	w.mu.Unlock()
 	err = tr.Write(ctx, doc)
 	if err == nil {
+		// The OS accepted every byte, but on macOS that only means they were
+		// buffered. Claim `transmitted` only while the Bluetooth link is
+		// confirmed up; otherwise the ticket's fate is unknowable.
+		if verr := w.connector.VerifyConnected(ctx, w.cfg); verr != nil {
+			w.closeTransport(StateDisconnected, verr.Error())
+			w.repo.MarkUncertain(d.ID, len(doc),
+				"bytes accepted by the OS but the printer is not connected")
+			w.bus.Publish(events.Event{Type: events.DeliveryUncertain, PrinterID: w.cfg.ID,
+				DeliveryID: d.ExternalDeliveryID, Message: "printer disconnected during transmission"})
+			w.bus.Publish(events.Event{Type: events.PrinterDisconnected, PrinterID: w.cfg.ID,
+				Message: "OS reports the printer disconnected"})
+			return
+		}
 		now := time.Now().UTC()
 		w.repo.MarkTransmitted(d.ID, len(doc))
 		w.mu.Lock()

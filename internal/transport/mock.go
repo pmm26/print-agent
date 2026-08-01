@@ -21,6 +21,9 @@ type MockTransport struct {
 	FailAfter    int   // bytes accepted before FailWrite triggers (0 = fail immediately)
 	HangOnWrite  bool  // block until ctx is done, simulating a stalled link
 	failWriteOnce bool
+	// OnWrite, when set, runs after a successful write completes — lets
+	// tests change state at the exact moment bytes have been "accepted".
+	OnWrite func([]byte)
 }
 
 func NewMock(endpoint string) *MockTransport {
@@ -66,7 +69,11 @@ func (m *MockTransport) Write(ctx context.Context, data []byte) error {
 		return &WriteError{BytesWritten: n, Err: err}
 	}
 	m.writes = append(m.writes, append([]byte(nil), data...))
+	hook := m.OnWrite
 	m.mu.Unlock()
+	if hook != nil {
+		hook(data)
+	}
 	return nil
 }
 

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,23 +24,33 @@ import (
 	"print-agent/internal/transport"
 )
 
-type stubConnector struct{}
+// stubConnector mimics the OS view of the Bluetooth link. linkDown
+// simulates macOS reporting the paired printer as disconnected while the
+// serial endpoint still accepts (buffers) writes.
+type stubConnector struct{ linkDown atomic.Bool }
 
-func (stubConnector) EnsureConnected(ctx context.Context, cfg config.PrinterConfig) (string, error) {
+func (c *stubConnector) EnsureConnected(ctx context.Context, cfg config.PrinterConfig) (string, error) {
 	return cfg.Endpoint, nil
 }
-func (stubConnector) Disconnect(ctx context.Context, cfg config.PrinterConfig) error { return nil }
-func (stubConnector) ListCandidates(ctx context.Context) ([]bluetooth.Candidate, error) {
+func (c *stubConnector) Disconnect(ctx context.Context, cfg config.PrinterConfig) error { return nil }
+func (c *stubConnector) ListCandidates(ctx context.Context) ([]bluetooth.Candidate, error) {
 	return nil, nil
 }
-func (stubConnector) OpenSystemBluetoothSettings(ctx context.Context) error { return nil }
+func (c *stubConnector) OpenSystemBluetoothSettings(ctx context.Context) error { return nil }
+func (c *stubConnector) VerifyConnected(ctx context.Context, cfg config.PrinterConfig) error {
+	if c.linkDown.Load() {
+		return bluetooth.ErrNotConnected
+	}
+	return nil
+}
 
 // harness wires the real components with singleton mock transports.
 type harness struct {
-	t       *testing.T
-	repo    *jobs.Repository
-	service *jobs.Service
-	manager *printers.Manager
+	t         *testing.T
+	repo      *jobs.Repository
+	service   *jobs.Service
+	manager   *printers.Manager
+	connector *stubConnector
 
 	mu    sync.Mutex
 	mocks map[string]*transport.MockTransport
@@ -53,7 +64,7 @@ func newHarness(t *testing.T, printerIDs ...string) *harness {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	h := &harness{t: t, mocks: map[string]*transport.MockTransport{}}
+	h := &harness{t: t, mocks: map[string]*transport.MockTransport{}, connector: &stubConnector{}}
 	factory := func(cfg config.PrinterConfig) transport.Transport {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -77,7 +88,7 @@ func newHarness(t *testing.T, printerIDs ...string) *harness {
 
 	bus := events.NewBus()
 	h.repo = jobs.NewRepository(db)
-	h.manager = printers.NewManager(configRepo, h.repo, stubConnector{}, bus, factory)
+	h.manager = printers.NewManager(configRepo, h.repo, h.connector, bus, factory)
 	h.service = jobs.NewService(h.repo, bus, h.manager, escpos.KnownTemplate)
 	h.service.SetWaker(h.manager)
 
@@ -233,6 +244,59 @@ func TestDuplicateSubmissionPrintsOnce(t *testing.T) {
 	if n := len(h.mock("cashier").Writes()); n != 1 {
 		t.Fatalf("printed %d times, want exactly 1", n)
 	}
+}
+
+// TestLinkDownBeforeWriteStaysQueued: the OS reports the printer
+// disconnected before anything is claimed — the delivery must wait in the
+// queue (retry-safe) while the worker reconnects.
+func TestLinkDownBeforeWriteStaysQueued(t *testing.T) {
+	h := newHarness(t, "kitchen")
+	h.submit("warmup", "kitchen")
+	h.waitStatus("warmup:kitchen", jobs.DeliveryTransmitted, 3*time.Second)
+
+	h.connector.linkDown.Store(true)
+	h.submit("order-6", "kitchen")
+	time.Sleep(500 * time.Millisecond)
+	d, err := h.repo.GetDeliveryByExternalID("order-6:kitchen")
+	if err != nil || d.Status != jobs.DeliveryQueued {
+		t.Fatalf("delivery = %s (%v), want queued while link is down", d.Status, err)
+	}
+
+	// Link restored: the queued delivery prints without operator action.
+	h.connector.linkDown.Store(false)
+	h.manager.Reconnect("kitchen")
+	h.waitStatus("order-6:kitchen", jobs.DeliveryTransmitted, 10*time.Second)
+}
+
+// TestSilentBufferedWriteBecomesUncertain covers the macOS trap: the serial
+// write "succeeds" (the OS buffers it) but the Bluetooth link died mid-
+// flight. The delivery must become uncertain, never transmitted.
+func TestSilentBufferedWriteBecomesUncertain(t *testing.T) {
+	h := newHarness(t, "kitchen")
+	// Drop the link at the exact moment the bytes are "accepted".
+	h.mock("kitchen").OnWrite = func([]byte) { h.connector.linkDown.Store(true) }
+
+	h.submit("order-7", "kitchen")
+	d := h.waitStatus("order-7:kitchen", jobs.DeliveryUncertain, 5*time.Second)
+	if d.BytesWritten == 0 {
+		t.Error("bytes were written to the OS; bytesWritten should reflect that")
+	}
+
+	// Uncertain must not auto-retry even after the link returns.
+	h.mock("kitchen").OnWrite = nil
+	h.connector.linkDown.Store(false)
+	h.manager.Reconnect("kitchen")
+	time.Sleep(500 * time.Millisecond)
+	if d, _ := h.repo.GetDeliveryByExternalID("order-7:kitchen"); d.Status != jobs.DeliveryUncertain {
+		t.Fatalf("uncertain delivery auto-retried: %s", d.Status)
+	}
+
+	// A manual reprint goes through.
+	reprint, err := h.service.Reprint("order-7:kitchen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.waitStatus(reprint.ExternalDeliveryID, jobs.DeliveryTransmitted, 10*time.Second)
 }
 
 func containsBytes(haystack, needle []byte) bool {

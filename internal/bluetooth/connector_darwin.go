@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"print-agent/internal/config"
 )
@@ -21,7 +23,46 @@ func NewPlatformConnector() Connector { return &darwinConnector{} }
 // darwinConnector resolves paired Bluetooth SPP printers to /dev/cu.*
 // endpoints. macOS creates /dev/cu.<DeviceName> (spaces stripped/replaced)
 // for paired devices that expose a serial port profile.
-type darwinConnector struct{}
+//
+// The paired-device snapshot from system_profiler is cached briefly: the
+// command takes ~1s and VerifyConnected is called every few seconds per
+// printer.
+type darwinConnector struct {
+	mu       sync.Mutex
+	cached   []pairedDevice
+	cachedAt time.Time
+}
+
+// deviceCacheTTL bounds how stale the paired-device snapshot may be.
+const deviceCacheTTL = 3 * time.Second
+
+func (c *darwinConnector) devices(ctx context.Context) []pairedDevice {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if time.Since(c.cachedAt) > deviceCacheTTL {
+		c.cached = pairedDevices(ctx)
+		c.cachedAt = time.Now()
+	}
+	return c.cached
+}
+
+// VerifyConnected reports ErrNotConnected only when the paired device is
+// positively known to be disconnected. Unknown devices (no MAC stored and no
+// name correlation) verify as connected — better optimistic than flapping.
+func (c *darwinConnector) VerifyConnected(ctx context.Context, cfg config.PrinterConfig) error {
+	nodeName := strings.TrimPrefix(filepath.Base(cfg.Endpoint), "cu.")
+	for _, d := range c.devices(ctx) {
+		match := (cfg.DeviceAddress != "" && strings.EqualFold(d.address, cfg.DeviceAddress)) ||
+			matchesDeviceName(d.name, nodeName)
+		if match {
+			if d.connected {
+				return nil
+			}
+			return ErrNotConnected
+		}
+	}
+	return nil // device not in the paired list: state unknowable
+}
 
 func (c *darwinConnector) EnsureConnected(ctx context.Context, cfg config.PrinterConfig) (string, error) {
 	// Fast path: the configured endpoint exists. Opening it triggers the
@@ -55,7 +96,7 @@ func (c *darwinConnector) ListCandidates(ctx context.Context) ([]Candidate, erro
 	if err != nil {
 		return nil, err
 	}
-	paired := pairedDevices(ctx)
+	paired := c.devices(ctx)
 	var out []Candidate
 	for _, dev := range devs {
 		name := strings.TrimPrefix(filepath.Base(dev), "cu.")

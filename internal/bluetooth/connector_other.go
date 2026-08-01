@@ -33,6 +33,10 @@ func (s *stubConnector) ListCandidates(ctx context.Context) ([]Candidate, error)
 	return nil, errUnimplemented
 }
 
+func (s *stubConnector) VerifyConnected(ctx context.Context, cfg config.PrinterConfig) error {
+	return nil // no OS-level view available; trust the write path
+}
+
 func (s *stubConnector) OpenSystemBluetoothSettings(ctx context.Context) error {
 	return errUnimplemented
 }

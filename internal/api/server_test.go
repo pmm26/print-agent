@@ -33,6 +33,9 @@ func (stubConnector) ListCandidates(ctx context.Context) ([]bluetooth.Candidate,
 	return nil, nil
 }
 func (stubConnector) OpenSystemBluetoothSettings(ctx context.Context) error { return nil }
+func (stubConnector) VerifyConnected(ctx context.Context, cfg config.PrinterConfig) error {
+	return nil
+}
 
 func newTestServer(t *testing.T) (*httptest.Server, *AuthService) {
 	t.Helper()
