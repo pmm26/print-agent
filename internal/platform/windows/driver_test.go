@@ -10,9 +10,10 @@ import (
 
 func TestAddressFromInstanceID(t *testing.T) {
 	tests := map[string]string{
-		`BTHENUM\DEV_001122AABBCC\7&123&0&BLUETOOTHDEVICE_001122AABBCC`:                "00:11:22:AA:BB:CC",
-		`BTHENUM\{00001101-0000-1000-8000-00805F9B34FB}_VID&00010000_DEV_FFEEDDCCBBAA`: "FF:EE:DD:CC:BB:AA",
-		`USB\VID_0403&PID_6001\ABCDEF`:                                                 "",
+		`BTHENUM\DEV_001122AABBCC\7&123&0&BLUETOOTHDEVICE_001122AABBCC`:                                            "00:11:22:AA:BB:CC",
+		`BTHENUM\{00001101-0000-1000-8000-00805F9B34FB}_VID&00010000_DEV_FFEEDDCCBBAA`:                             "FF:EE:DD:CC:BB:AA",
+		`BTHENUM\{00001101-0000-1000-8000-00805f9b34fb}_VID&0001009e_PID&4024\7&241f7ad1&0&4C875D28F57A_C00000000`: "4C:87:5D:28:F5:7A",
+		`USB\VID_0403&PID_6001\ABCDEF`: "",
 	}
 	for input, want := range tests {
 		if got := addressFromInstanceID(input); got != want {

@@ -11,6 +11,7 @@ import (
 
 var (
 	bluetoothAddressRE = regexp.MustCompile(`(?i)(?:^|[_\\&])DEV_?([0-9A-F]{12})(?:$|[_\\&])`)
+	hexAddressRE       = regexp.MustCompile(`(?i)^[0-9A-F]{12}$`)
 	comSuffixRE        = regexp.MustCompile(`(?i)\s*\(COM\d+\)\s*$`)
 )
 
@@ -36,10 +37,20 @@ func sameCOMPort(left, right string) bool {
 
 func addressFromInstanceID(instanceID string) string {
 	matches := bluetoothAddressRE.FindStringSubmatch(instanceID)
-	if len(matches) != 2 {
-		return ""
+	if len(matches) == 2 {
+		return addressFromHex(matches[1])
 	}
-	raw := strings.ToUpper(matches[1])
+	for _, segment := range strings.FieldsFunc(instanceID, func(r rune) bool { return r == '\\' || r == '&' }) {
+		candidate, _, _ := strings.Cut(segment, "_")
+		if hexAddressRE.MatchString(candidate) {
+			return addressFromHex(candidate)
+		}
+	}
+	return ""
+}
+
+func addressFromHex(value string) string {
+	raw := strings.ToUpper(value)
 	return raw[0:2] + ":" + raw[2:4] + ":" + raw[4:6] + ":" + raw[6:8] + ":" + raw[8:10] + ":" + raw[10:12]
 }
 
