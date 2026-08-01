@@ -36,8 +36,9 @@ const dashboardRoutes = {
   "/admin/setup/pos": { panel: "pairing", category: "setup", title: "POS Pairing" },
   "/admin/operations/jobs": { panel: "jobs", category: "operations", title: "Jobs" },
   "/admin/operations/queue": { panel: "queue", category: "operations", title: "Queue" },
+  "/admin/operations/printer-logs": { panel: "printer-logs", category: "operations", title: "Printer Logs" },
   "/admin/system/diagnostics": { panel: "diagnostics", category: "system", title: "Diagnostics" },
-  "/admin/system/logs": { panel: "logs", category: "system", title: "Logs" },
+  "/admin/system/logs": { panel: "system-logs", category: "system", title: "System Logs" },
   "/admin/dev/pos-simulator": { panel: "dev", category: "dev", title: "POS Simulator" },
 };
 const routeForPanel = Object.fromEntries(Object.entries(dashboardRoutes).map(([path, page]) => [page.panel, path]));
@@ -64,19 +65,23 @@ function activateDashboardPath(path) {
     queue: refreshQueue,
     pairing: refreshPairing,
     diagnostics: refreshDiagnostics,
-    logs: refreshLogs,
+    "system-logs": refreshSystemLogs,
+    "printer-logs": refreshPrinterLogs,
     dev: refreshDevSimulator,
   };
   refreshers[page.panel]?.();
+  syncPrinterDetailFromURL();
 }
 
 function navigateDashboard(path, { replace = false } = {}) {
-  if (!dashboardRoutes[path]) path = defaultDashboardPath;
-  if (window.location.pathname !== path) {
-    window.history[replace ? "replaceState" : "pushState"]({}, "", path);
+  let target = new URL(path, window.location.origin);
+  if (!dashboardRoutes[target.pathname]) target = new URL(defaultDashboardPath, window.location.origin);
+  const destination = target.pathname + target.search;
+  if (window.location.pathname + window.location.search !== destination) {
+    window.history[replace ? "replaceState" : "pushState"]({}, "", destination);
   }
   closeNavigationMenus();
-  activateDashboardPath(path);
+  activateDashboardPath(target.pathname);
 }
 
 function activateTab(name) {
@@ -116,6 +121,23 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtTime = (iso) => (iso ? new Date(iso).toLocaleTimeString() : "—");
 
+function wireCheckboxGroup(master, root, itemSelector) {
+  const items = () => [...root.querySelectorAll(itemSelector)].filter((input) => !input.disabled);
+  const syncMaster = () => {
+    const available = items();
+    const selected = available.filter((input) => input.checked).length;
+    master.disabled = available.length === 0;
+    master.checked = available.length > 0 && selected === available.length;
+    master.indeterminate = selected > 0 && selected < available.length;
+  };
+  master.onchange = () => {
+    items().forEach((input) => { input.checked = master.checked; });
+    syncMaster();
+  };
+  items().forEach((input) => { input.onchange = syncMaster; });
+  syncMaster();
+}
+
 // ---- Jobs ----
 async function refreshJobs() {
   if ($("#tab-jobs").classList.contains("hidden")) return;
@@ -135,57 +157,163 @@ async function refreshJobs() {
     row.addEventListener("click", () => openJob(row.dataset.jobUid)));
 }
 
-async function openJob(uid) {
+let activeJobDetail = null;
+let jobDialogRequest = 0;
+const jobRunSignatures = new WeakMap();
+
+function jobTargetState(target) {
+  if (target.fulfilled) return { label: "fulfilled", badge: "connected" };
+  if (target.cancelled) return { label: "cancelled", badge: "cancelled" };
+  return { label: "unfulfilled", badge: "error" };
+}
+
+function jobRunRowsHTML(target) {
+  return (target.runs || []).map((run) => `<tr><td>${run.runNumber}</td><td>${esc(run.uid)}</td>
+    <td>${esc(run.trigger)}</td><td>${esc(run.status)}${run.retryPending ? " · retry pending" : ""}</td>
+    <td>${esc(run.errorMessage || "")}</td></tr>`).join("") ||
+    `<tr><td colspan="5" class="muted">No Print Runs</td></tr>`;
+}
+
+function jobPrinterCardHTML(target, index) {
+  const state = jobTargetState(target);
+  return `<div class="card job-printer" data-printer-id="${esc(target.printerId)}">
+    <h3><label class="checkbox-label" for="job-target-${index}"><input id="job-target-${index}" type="checkbox" data-reprint-printer value="${esc(target.printerId)}"> ${esc(target.printerId)}</label>
+      <span data-job-target-state class="badge ${state.badge}">${state.label}</span></h3>
+    <table><thead><tr><th>#</th><th>UID</th><th>Trigger</th><th>Status</th><th>Error</th></tr></thead>
+      <tbody>${jobRunRowsHTML(target)}</tbody></table></div>`;
+}
+
+function jobDialogHTML(job) {
+  const printerCards = (job.originalPrinters || []).map(jobPrinterCardHTML).join("");
+  return `<div class="card">
+    <div><b>UID:</b> <span data-job-summary="uid">${esc(job.uid)}</span></div>
+    <div><b>State:</b> <span data-job-summary="state">${esc(job.state)}</span></div>
+    <div><b>Original printers:</b> <span data-job-summary="printers">${job.fulfilledPrinterCount}/${job.originalPrinterCount} fulfilled</span></div>
+    <pre>${esc(JSON.stringify(job.data, null, 2))}</pre></div>
+    <div class="selection-toolbar"><label class="checkbox-label" for="job-select-all"><input id="job-select-all" type="checkbox"> Select all targets</label></div>
+    ${printerCards}
+    <div class="toolbar"><button id="btn-job-reprint" class="primary">Reprint selected</button>
+      <button id="btn-job-cancel" class="danger">Cancel selected targets</button></div>`;
+}
+
+function updateJobTargetCard(card, target) {
+  const state = jobTargetState(target);
+  const badge = card.querySelector("[data-job-target-state]");
+  badge.textContent = state.label;
+  badge.className = `badge ${state.badge}`;
+  const body = card.querySelector("tbody");
+  const signature = JSON.stringify((target.runs || []).map((run) =>
+    [run.uid, run.runNumber, run.trigger, run.status, run.retryPending, run.errorMessage]));
+  if (jobRunSignatures.get(body) !== signature) {
+    body.innerHTML = jobRunRowsHTML(target);
+    jobRunSignatures.set(body, signature);
+  }
+}
+
+function renderJobDialog(job) {
+  const root = $("#job-detail");
+  const sameJob = activeJobDetail?.uid === job.uid && root.dataset.jobUid === job.uid && $("#job-dialog").open;
+  activeJobDetail = job;
+  $("#job-dialog-title").textContent = `${job.jobId} / ${job.template}`;
+
+  const targets = job.originalPrinters || [];
+  const cards = [...root.querySelectorAll(".job-printer")];
+  const targetsMatch = sameJob && cards.length === targets.length &&
+    cards.every((card, index) => card.dataset.printerId === targets[index].printerId);
+  if (!targetsMatch) {
+    root.dataset.jobUid = job.uid;
+    root.innerHTML = jobDialogHTML(job);
+    wireCheckboxGroup($("#job-select-all"), root, "[data-reprint-printer]");
+    $("#btn-job-reprint").addEventListener("click", reprintSelectedJobTargets);
+    $("#btn-job-cancel").addEventListener("click", cancelSelectedJobTargets);
+    [...root.querySelectorAll(".job-printer")].forEach((card, index) => updateJobTargetCard(card, targets[index]));
+    return;
+  }
+
+  root.querySelector('[data-job-summary="state"]').textContent = job.state;
+  root.querySelector('[data-job-summary="printers"]').textContent =
+    `${job.fulfilledPrinterCount}/${job.originalPrinterCount} fulfilled`;
+  cards.forEach((card, index) => updateJobTargetCard(card, targets[index]));
+}
+
+function selectedJobTargetIDs() {
+  return [...$("#job-detail").querySelectorAll("[data-reprint-printer]:checked")].map((input) => input.value);
+}
+
+function setJobActionsPending(pending) {
+  [$("#btn-job-reprint"), $("#btn-job-cancel")].filter(Boolean).forEach((button) => { button.disabled = pending; });
+}
+
+async function refreshJobAfterAction(jobUID) {
+  if ($("#job-dialog").open && activeJobDetail?.uid === jobUID) await openJob(jobUID, { show: false });
+  refreshJobs();
+  refreshQueue();
+}
+
+async function reprintSelectedJobTargets() {
+  const job = activeJobDetail;
+  if (!job) return;
+  const printerIds = selectedJobTargetIDs();
+  if (!printerIds.length) return toast("Select at least one printer", true);
+  const uncertain = (job.originalPrinters || []).some((target) => printerIds.includes(target.printerId) &&
+    (target.runs || []).some((run) => run.status === "uncertain" && !run.resolution));
+  const warning = uncertain ? "The earlier result is uncertain and may already have printed. " : "";
+  if (!confirm(`${warning}Create ${printerIds.length} physical reprint(s)?`)) return;
+  const reason = prompt("Reason for reprint (optional):", "") || "";
+  setJobActionsPending(true);
+  try {
+    await api(`/jobs/${encodeURIComponent(job.uid)}/reprint`, { method: "POST", body: JSON.stringify({
+      reprintRequestId: crypto.randomUUID(), printerIds, reason,
+    }) });
+    toast("Reprint queued");
+    await refreshJobAfterAction(job.uid);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    setJobActionsPending(false);
+  }
+}
+
+async function cancelSelectedJobTargets() {
+  const job = activeJobDetail;
+  if (!job) return;
+  const printerIds = selectedJobTargetIDs();
+  if (!printerIds.length) return toast("Select at least one printer", true);
+  if (!confirm(`Cancel pending output for ${printerIds.length} original printer target(s)?`)) return;
+  const reason = prompt("Cancellation reason (optional):", "") || "";
+  setJobActionsPending(true);
+  try {
+    await api(`/jobs/${encodeURIComponent(job.uid)}/cancel`, {
+      method: "POST", body: JSON.stringify({ printerIds, reason }),
+    });
+    toast("Targets cancelled");
+    await refreshJobAfterAction(job.uid);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    setJobActionsPending(false);
+  }
+}
+
+async function openJob(uid, { show = true } = {}) {
+  const request = ++jobDialogRequest;
   try {
     const job = await api(`/jobs/${encodeURIComponent(uid)}`);
-    $("#job-dialog-title").textContent = `${job.jobId} / ${job.template}`;
-    $("#job-detail").innerHTML = `<div class="card">
-      <div><b>UID:</b> ${esc(job.uid)}</div><div><b>State:</b> ${esc(job.state)}</div>
-      <div><b>Original printers:</b> ${job.fulfilledPrinterCount}/${job.originalPrinterCount} fulfilled</div>
-      <pre>${esc(JSON.stringify(job.data, null, 2))}</pre></div>` +
-      (job.originalPrinters || []).map((printer) => `<div class="card job-printer" data-printer-id="${esc(printer.printerId)}">
-        <h3><label><input type="checkbox" data-reprint-printer value="${esc(printer.printerId)}"> ${esc(printer.printerId)}</label>
-          <span class="badge ${printer.fulfilled ? "connected" : printer.cancelled ? "cancelled" : "error"}">
-          ${printer.fulfilled ? "fulfilled" : printer.cancelled ? "cancelled" : "unfulfilled"}</span></h3>
-        <table><thead><tr><th>#</th><th>UID</th><th>Trigger</th><th>Status</th><th>Error</th></tr></thead><tbody>
-        ${(printer.runs || []).map((run) => `<tr><td>${run.runNumber}</td><td>${esc(run.uid)}</td>
-          <td>${esc(run.trigger)}</td><td>${esc(run.status)}${run.retryPending ? " · retry pending" : ""}</td>
-          <td>${esc(run.errorMessage || "")}</td></tr>`).join("")}</tbody></table></div>`).join("") +
-      `<div class="toolbar"><button id="btn-job-reprint" class="primary">Reprint selected</button>
-        <button id="btn-job-cancel" class="danger">Cancel selected targets</button></div>`;
-    $("#btn-job-reprint").addEventListener("click", async () => {
-      const printerIds = [...$("#job-detail").querySelectorAll("[data-reprint-printer]:checked")].map((el) => el.value);
-      if (!printerIds.length) return toast("Select at least one printer", true);
-      const uncertain = (job.originalPrinters || []).some((p) => printerIds.includes(p.printerId) && (p.runs || []).some((r) => r.status === "uncertain" && !r.resolution));
-      const warning = uncertain ? "The earlier result is uncertain and may already have printed. " : "";
-      if (!confirm(`${warning}Create ${printerIds.length} physical reprint(s)?`)) return;
-      const reason = prompt("Reason for reprint (optional):", "") || "";
-      await api(`/jobs/${encodeURIComponent(job.uid)}/reprint`, { method: "POST", body: JSON.stringify({
-        reprintRequestId: crypto.randomUUID(), printerIds, reason,
-      }) });
-      toast("Reprint queued");
-      await openJob(job.uid);
-      refreshJobs();
-      refreshQueue();
-    });
-    $("#btn-job-cancel").addEventListener("click", async () => {
-      const printerIds = [...$("#job-detail").querySelectorAll("[data-reprint-printer]:checked")].map((el) => el.value);
-      if (!printerIds.length) return toast("Select at least one printer", true);
-      if (!confirm(`Cancel pending output for ${printerIds.length} original printer target(s)?`)) return;
-      const reason = prompt("Cancellation reason (optional):", "") || "";
-      await api(`/jobs/${encodeURIComponent(job.uid)}/cancel`, { method: "POST", body: JSON.stringify({ printerIds, reason }) });
-      toast("Targets cancelled");
-      await openJob(job.uid);
-      refreshJobs();
-      refreshQueue();
-    });
-    if (!$("#job-dialog").open) $("#job-dialog").showModal();
-  } catch (e) { toast(e.message, true); }
+    if (request !== jobDialogRequest) return;
+    renderJobDialog(job);
+    if (show && !$("#job-dialog").open) $("#job-dialog").showModal();
+  } catch (error) {
+    if (request === jobDialogRequest) toast(error.message, true);
+  }
 }
 
 $("#btn-jobs-refresh").addEventListener("click", refreshJobs);
 $("#jobs-filter").addEventListener("change", refreshJobs);
 $("#btn-job-close").addEventListener("click", () => $("#job-dialog").close());
+$("#job-dialog").addEventListener("close", () => {
+  jobDialogRequest++;
+  activeJobDetail = null;
+});
 
 // ---- Bluetooth discovery & device pairing ----
 let scanning = false;
@@ -205,7 +333,11 @@ async function refreshBluetoothDevices() {
   if ($("#tab-bluetooth").classList.contains("hidden")) return false;
   const root = $("#device-list");
   try {
-    const result = await api("/bluetooth/devices");
+    const [result, printerStatuses] = await Promise.all([
+      api("/bluetooth/devices"),
+      api("/printers").catch(() => knownPrinters),
+    ]);
+    knownPrinters = printerStatuses || [];
     if (!result.supported) {
       $("#scan-status").textContent = "In-app pairing is available on Linux. Use your operating system Bluetooth settings here.";
       $("#btn-scan").disabled = true;
@@ -223,6 +355,27 @@ async function refreshBluetoothDevices() {
   }
 }
 
+function normalizeBluetoothAddress(value) {
+  return String(value || "").trim().replaceAll("-", ":").toUpperCase();
+}
+
+function bluetoothAddressFromEndpoint(endpoint) {
+  const value = String(endpoint || "").trim();
+  const separator = value.indexOf("://");
+  return separator >= 0 ? normalizeBluetoothAddress(value.slice(separator + 3)) : "";
+}
+
+function configuredPrintersForDevice(device) {
+  const endpoint = String(device.endpoint || "").trim().toLowerCase();
+  const address = normalizeBluetoothAddress(device.address);
+  return knownPrinters.filter((status) => {
+    const printer = status.printer || {};
+    if (endpoint && String(printer.endpoint || "").trim().toLowerCase() === endpoint) return true;
+    const configuredAddress = normalizeBluetoothAddress(printer.deviceAddress) || bluetoothAddressFromEndpoint(printer.endpoint);
+    return address !== "" && configuredAddress === address;
+  });
+}
+
 function renderBluetoothDevices(devices) {
   const root = $("#device-list");
   if (!devices.length) {
@@ -231,6 +384,7 @@ function renderBluetoothDevices(devices) {
   }
   root.innerHTML = devices.map((device) => {
     const busy = pairingAddresses.has(device.address);
+    const configured = configuredPrintersForDevice(device);
     const state = device.paired
       ? `<span class="badge connected">paired</span>`
       : device.endpoint
@@ -238,7 +392,11 @@ function renderBluetoothDevices(devices) {
         : `<span class="badge disabled">not paired</span>`;
     const connected = device.connected ? `<span class="badge printing">connected</span>` : "";
     const printer = device.isPrinter ? `<span class="device-kind">🖨 Likely printer</span>` : "";
-    const action = device.endpoint
+    const configuredNames = configured.map((status) => status.printer.displayName || status.printer.id).join(", ");
+    const action = configured.length
+      ? `<span class="configured-device"><span class="badge connected">added</span> ${esc(configuredNames)}</span>
+         <button data-device-act="manage" data-printer-id="${esc(configured[0].printer.id)}">View printer</button>`
+      : device.endpoint
       ? `<button class="primary" data-device-act="add" data-endpoint="${esc(device.endpoint)}">Add printer</button>`
       : device.paired
         ? `<span class="muted">Paired, but no printer endpoint was found.</span>`
@@ -281,6 +439,11 @@ function renderBluetoothDevices(devices) {
     btn.addEventListener("click", () => {
       activateTab("printers");
       openDialog(null, btn.dataset.endpoint);
+    });
+  });
+  root.querySelectorAll("button[data-device-act=manage]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      navigateDashboard(`/admin/setup/printers?${new URLSearchParams({ printerId: btn.dataset.printerId })}`);
     });
   });
 }
@@ -334,25 +497,32 @@ async function refreshStatus() {
 }
 
 let knownPrinters = [];
+let knownPrintersLoaded = false;
 function renderPrinters(list) {
 	knownPrinters = list;
+	knownPrintersLoaded = true;
 	renderDevPrinters(list);
-	const selected = $("#queue-printer")?.value || "";
+	const requestedQueuePrinter = window.location.pathname === "/admin/operations/queue"
+		? new URLSearchParams(window.location.search).get("printerId") || ""
+		: "";
+	const selected = requestedQueuePrinter || $("#queue-printer")?.value || "";
 	if ($("#queue-printer")) {
 		$("#queue-printer").innerHTML = `<option value="">All printers</option>` + list.map((st) =>
 			`<option value="${esc(st.printer.id)}">${esc(st.printer.displayName)}</option>`).join("");
 		$("#queue-printer").value = selected;
 	}
+	refreshPrinterLogPrinterOptions();
   const root = $("#printer-list");
   if (!list.length) {
     root.innerHTML = `<div class="card muted">No printers configured yet. Pair devices in the first tab, then use <b>Add printer</b>.</div>`;
+    syncPrinterDetailFromURL();
     return;
   }
   root.innerHTML = list.map((st) => {
     const p = st.printer;
     const attn = st.attentionCount ? `<span class="attn">⚠ ${st.attentionCount} need attention</span>` : "";
     const retry = st.nextRetryAt ? ` · retry ${fmtTime(st.nextRetryAt)} (attempt ${st.reconnectAttempt})` : "";
-    return `<div class="card printer" data-id="${esc(p.id)}">
+    return `<div class="card printer" data-id="${esc(p.id)}" role="button" tabindex="0" aria-label="Open ${esc(p.displayName)} details">
       <div>
         <h2>${esc(p.displayName)} <span class="badge ${esc(st.state)}">${esc(st.state)}</span></h2>
         <div class="meta"><b>${esc(st.endpoint || "no endpoint")}</b> · queue: <b>${st.queueDepth}</b> ·
@@ -362,9 +532,6 @@ function renderPrinters(list) {
       <div class="actions">
         <button data-act="test">Test print</button>
         <button data-act="reconnect">Reconnect</button>
-        <button data-act="configure">Configure</button>
-        <button data-act="toggle">${p.enabled ? "Disable" : "Enable"}</button>
-        <button data-act="remove" class="danger">Remove</button>
       </div>
     </div>`;
   }).join("");
@@ -372,20 +539,226 @@ function renderPrinters(list) {
   root.querySelectorAll("button[data-act]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const id = btn.closest(".printer").dataset.id;
-      const p = list.find((s) => s.printer.id === id)?.printer;
       switch (btn.dataset.act) {
         case "test": return call(() => api(`/printers/${id}/test`, { method: "POST" }), `Test print queued for ${id}`);
         case "reconnect": return call(() => api(`/printers/${id}/reconnect`, { method: "POST" }), `Reconnecting ${id}`);
-        case "toggle": return call(() => api(`/printers/${id}/${p.enabled ? "disable" : "enable"}`, { method: "POST" }));
-        case "remove":
-          if (confirm(`Remove printer "${id}"? Its history is kept, but the configuration is deleted.`))
-            call(() => api(`/printers/${id}`, { method: "DELETE" }), `Removed ${id}`);
-          return;
-        case "configure": return openDialog(p);
       }
     });
   });
+  root.querySelectorAll(".printer").forEach((card) => {
+    const open = () => navigateDashboard(printerRoute(card.dataset.id));
+    card.addEventListener("click", (event) => { if (!event.target.closest("button")) open(); });
+    card.addEventListener("keydown", (event) => {
+      if (event.target !== card || (event.key !== "Enter" && event.key !== " ")) return;
+      event.preventDefault();
+      open();
+    });
+  });
+  syncPrinterDetailFromURL();
 }
+
+// ---- printer details ----
+let printerDetailID = "";
+let printerDetailTab = "overview";
+let printerDetailQueueRequest = 0;
+let printerDetailLogsRequest = 0;
+
+function printerStatus(id = printerDetailID) {
+  return knownPrinters.find((status) => status.printer.id === id) || null;
+}
+
+function printerRoute(id) {
+  return `/admin/setup/printers?${new URLSearchParams({ printerId: id })}`;
+}
+
+function hidePrinterDetail() {
+  printerDetailID = "";
+  printerDetailQueueRequest++;
+  printerDetailLogsRequest++;
+  if ($("#printer-detail-dialog").open) $("#printer-detail-dialog").close();
+}
+
+function printerInfoItem(label, value) {
+  return `<div class="printer-info-item"><dt>${esc(label)}</dt><dd>${esc(value ?? "—")}</dd></div>`;
+}
+
+function detailDate(value) {
+  return value ? new Date(value).toLocaleString() : "—";
+}
+
+function renderPrinterDetailOverview(status) {
+  const printer = status.printer;
+  $("#printer-detail-title").textContent = printer.displayName;
+  $("#printer-detail-state").textContent = status.state;
+  $("#printer-detail-state").className = `badge ${status.state}`;
+  $("#printer-detail-subtitle").textContent = `${printer.id} · ${status.endpoint || "No endpoint"}`;
+  $("#printer-detail-info").innerHTML = [
+    ["Printer ID", printer.id],
+    ["Connection", status.state],
+    ["Enabled", printer.enabled ? "Yes" : "No"],
+    ["Endpoint", status.endpoint || printer.endpoint || "—"],
+    ["Device address", printer.deviceAddress || "—"],
+    ["Transport", printer.transport || "—"],
+    ["Queue depth", status.queueDepth],
+    ["Needs attention", status.attentionCount],
+    ["Last transmission", detailDate(status.lastTransmission)],
+    ["Next reconnect", status.nextRetryAt ? `${detailDate(status.nextRetryAt)} (attempt ${status.reconnectAttempt || 1})` : "—"],
+    ["Encoding", printer.encoding || "—"],
+    ["Characters per line", printer.charactersPerLine || "—"],
+    ["Serial settings", printer.baudRate ? `${printer.baudRate} baud · ${printer.dataBits || 8}/${printer.parity || "none"}/${printer.stopBits || 1}` : "—"],
+    ["Auto reconnect", printer.autoReconnect ? "Yes" : "No"],
+    ["Updated", detailDate(printer.updatedAt)],
+  ].map(([label, value]) => printerInfoItem(label, value)).join("");
+  const error = $("#printer-detail-error");
+  error.textContent = status.lastError || "";
+  error.classList.toggle("hidden", !status.lastError);
+  $("#btn-printer-detail-toggle").textContent = printer.enabled ? "Disable" : "Enable";
+}
+
+function syncPrinterDetailFromURL() {
+  const dialog = $("#printer-detail-dialog");
+  if (!dialog) return;
+  const requestedID = window.location.pathname === "/admin/setup/printers"
+    ? new URLSearchParams(window.location.search).get("printerId") || ""
+    : "";
+  if (!requestedID) {
+    hidePrinterDetail();
+    return;
+  }
+  if (!knownPrintersLoaded) return;
+  const status = printerStatus(requestedID);
+  if (!status) {
+    hidePrinterDetail();
+    navigateDashboard("/admin/setup/printers", { replace: true });
+    toast(`Printer ${requestedID} was not found`, true);
+    return;
+  }
+  const changedPrinter = printerDetailID !== requestedID;
+  printerDetailID = requestedID;
+  if (changedPrinter) printerDetailTab = "overview";
+  renderPrinterDetailOverview(status);
+  if (!dialog.open) dialog.showModal();
+  setPrinterDetailTab(printerDetailTab, { refresh: changedPrinter });
+}
+
+function setPrinterDetailTab(tab, { refresh = true } = {}) {
+  if (!["overview", "queue", "logs"].includes(tab)) tab = "overview";
+  printerDetailTab = tab;
+  document.querySelectorAll("[data-printer-detail-tab]").forEach((button) => {
+    const active = button.dataset.printerDetailTab === tab;
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  for (const name of ["overview", "queue", "logs"]) {
+    $("#printer-detail-" + name).classList.toggle("hidden", name !== tab);
+  }
+  if (refresh && tab === "queue") refreshPrinterDetailQueue();
+  if (refresh && tab === "logs") refreshPrinterDetailLogs();
+}
+
+function collectQueueRuns(queue) {
+  const runs = [
+    ...(queue.processingRun ? [queue.processingRun] : []),
+    ...(queue.queuedRuns || []),
+    ...(queue.retryPendingRuns || []),
+    ...(queue.attentionRuns || []),
+    ...(queue.recentTransmittedRuns || []),
+  ];
+  const seen = new Set();
+  return runs.filter((run) => !seen.has(run.uid) && seen.add(run.uid));
+}
+
+async function refreshPrinterDetailQueue() {
+  const id = printerDetailID;
+  if (!id || printerDetailTab !== "queue") return;
+  const request = ++printerDetailQueueRequest;
+  $("#printer-detail-queue-body").innerHTML = `<span class="muted">Loading recent Print Runs…</span>`;
+  try {
+    const queue = await api(`/printers/${encodeURIComponent(id)}/queue?limit=50`);
+    if (request !== printerDetailQueueRequest || id !== printerDetailID) return;
+    const rows = collectQueueRuns(queue);
+    $("#printer-detail-queue-body").innerHTML = `<table><thead><tr><th>Created</th><th>Run</th><th>Job</th><th>#</th><th>Trigger</th><th>Status</th><th>Error</th><th></th></tr></thead><tbody>${rows.map((run) => `<tr data-job-uid="${esc(run.jobUid)}">
+      <td class="muted">${esc(detailDate(run.createdAt))}</td><td>${esc(run.uid)}</td><td>${esc(run.jobUid)}</td><td>${esc(run.runNumber)}</td>
+      <td>${esc(run.trigger)}</td><td><span class="badge ${esc(run.status)}">${esc(run.status)}</span></td>
+      <td>${esc(run.errorMessage || "")}</td><td><button data-view-job>View Job</button></td></tr>`).join("") || `<tr><td colspan="8" class="muted">No Print Runs for this printer</td></tr>`}</tbody></table>`;
+    $("#printer-detail-queue-body").querySelectorAll("button[data-view-job]").forEach((button) => {
+      button.addEventListener("click", () => openJob(button.closest("tr").dataset.jobUid));
+    });
+  } catch (error) {
+    if (request === printerDetailQueueRequest && id === printerDetailID)
+      $("#printer-detail-queue-body").innerHTML = `<div class="error">${esc(error.message)}</div>`;
+  }
+}
+
+async function refreshPrinterDetailLogs() {
+  const id = printerDetailID;
+  if (!id || printerDetailTab !== "logs") return;
+  const request = ++printerDetailLogsRequest;
+  $("#printer-detail-logs-body").innerHTML = `<span class="muted">Loading recent printer events…</span>`;
+  try {
+    const result = await fetchPrinterLogEvents({ filters: { printerId: id }, limit: 20 });
+    if (request !== printerDetailLogsRequest || id !== printerDetailID) return;
+    const entries = result.events || [];
+    $("#printer-detail-logs-body").innerHTML = `<table><thead><tr><th>Time</th><th>Event</th><th>Run</th><th>Message</th></tr></thead><tbody>${printerLogRowsHTML(entries, {
+      emptyMessage: "No recent events for this printer",
+    })}</tbody></table>`;
+  } catch (error) {
+    if (request === printerDetailLogsRequest && id === printerDetailID)
+      $("#printer-detail-logs-body").innerHTML = `<div class="error">${esc(error.message)}</div>`;
+  }
+}
+
+document.querySelectorAll("[data-printer-detail-tab]").forEach((button) => {
+  button.addEventListener("click", () => setPrinterDetailTab(button.dataset.printerDetailTab));
+});
+$("#btn-printer-detail-close").addEventListener("click", () => $("#printer-detail-dialog").close());
+$("#printer-detail-dialog").addEventListener("close", () => {
+  if (!printerDetailID) return;
+  printerDetailID = "";
+  if (window.location.pathname === "/admin/setup/printers")
+    navigateDashboard("/admin/setup/printers", { replace: true });
+});
+$("#btn-printer-detail-test").addEventListener("click", () => {
+  const id = printerDetailID;
+  if (id) call(() => api(`/printers/${encodeURIComponent(id)}/test`, { method: "POST" }), `Test print queued for ${id}`);
+});
+$("#btn-printer-detail-reconnect").addEventListener("click", () => {
+  const id = printerDetailID;
+  if (id) call(() => api(`/printers/${encodeURIComponent(id)}/reconnect`, { method: "POST" }), `Reconnecting ${id}`);
+});
+$("#btn-printer-detail-configure").addEventListener("click", () => {
+  const status = printerStatus();
+  if (status) openDialog(status.printer);
+});
+$("#btn-printer-detail-toggle").addEventListener("click", () => {
+  const status = printerStatus();
+  if (!status) return;
+  const operation = status.printer.enabled ? "disable" : "enable";
+  call(() => api(`/printers/${encodeURIComponent(printerDetailID)}/${operation}`, { method: "POST" }),
+    `${status.printer.displayName} ${operation}d`);
+});
+$("#btn-printer-detail-remove").addEventListener("click", async () => {
+  const status = printerStatus();
+  if (!status || !confirm(`Remove ${status.printer.displayName}? Existing job history will be preserved.`)) return;
+  const id = printerDetailID;
+  try {
+    await api(`/printers/${encodeURIComponent(id)}`, { method: "DELETE" });
+    hidePrinterDetail();
+    navigateDashboard("/admin/setup/printers", { replace: true });
+    toast(`${status.printer.displayName} removed`);
+    refreshStatus();
+  } catch (error) {
+    toast(error.message, true);
+  }
+});
+$("#btn-printer-detail-refresh-queue").addEventListener("click", refreshPrinterDetailQueue);
+$("#btn-printer-detail-refresh-logs").addEventListener("click", refreshPrinterDetailLogs);
+$("#btn-printer-detail-full-queue").addEventListener("click", () => {
+  if (printerDetailID) navigateDashboard(`/admin/operations/queue?${new URLSearchParams({ printerId: printerDetailID })}`);
+});
+$("#btn-printer-detail-full-logs").addEventListener("click", () => {
+  if (printerDetailID) navigateDashboard(`/admin/operations/printer-logs?${new URLSearchParams({ printerId: printerDetailID })}`);
+});
 
 $("#btn-reconnect-all").addEventListener("click", () =>
   call(() => api("/printers/reconnect-all", { method: "POST" }), "Reconnecting all printers"));
@@ -442,8 +815,16 @@ $("#printer-form").addEventListener("submit", (ev) => {
 });
 
 // ---- queue ----
+function syncQueuePrinterFilter() {
+  if (window.location.pathname !== "/admin/operations/queue") return;
+  const requested = new URLSearchParams(window.location.search).get("printerId") || "";
+  const select = $("#queue-printer");
+  select.value = [...select.options].some((option) => option.value === requested) ? requested : "";
+}
+
 async function refreshQueue() {
   if ($("#tab-queue").classList.contains("hidden")) return;
+  syncQueuePrinterFilter();
   const wantedStatus = $("#queue-filter").value;
   const selectedPrinter = $("#queue-printer").value;
   const printerIDs = selectedPrinter ? [selectedPrinter] : knownPrinters.map((st) => st.printer.id);
@@ -488,7 +869,11 @@ async function refreshQueue() {
 }
 $("#btn-queue-refresh").addEventListener("click", refreshQueue);
 $("#queue-filter").addEventListener("change", refreshQueue);
-$("#queue-printer").addEventListener("change", refreshQueue);
+$("#queue-printer").addEventListener("change", () => {
+  const params = new URLSearchParams();
+  if ($("#queue-printer").value) params.set("printerId", $("#queue-printer").value);
+  navigateDashboard(`/admin/operations/queue${params.size ? `?${params}` : ""}`);
+});
 
 // ---- Dev / POS Simulator ----
 let devLastRequest = null;
@@ -496,6 +881,7 @@ let devLastJobUID = "";
 let devActiveJob = null;
 let devLastReprint = null;
 let devRefreshPending = false;
+let devPrinterSelectionInitialized = false;
 
 function devID(prefix) {
   return prefix + (crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`);
@@ -548,18 +934,21 @@ function renderDevPrinters(list) {
   const selected = new Set(selectedDevPrinterIDs());
   if (!list.length) {
     root.innerHTML = `<span class="muted">No printers configured. Add a printer from Setup first.</span>`;
+    wireCheckboxGroup($("#dev-select-all-printers"), root, "[data-dev-printer]");
     return;
   }
   const defaultIndex = Math.max(0, list.findIndex((status) => status.printer.enabled));
   root.innerHTML = list.map((status, index) => {
     const printer = status.printer;
-    const checked = selected.has(printer.id) || (!selected.size && index === defaultIndex);
-    return `<label class="dev-printer-choice">
-      <input type="checkbox" data-dev-printer value="${esc(printer.id)}" ${checked ? "checked" : ""}>
+    const checked = selected.has(printer.id) || (!devPrinterSelectionInitialized && index === defaultIndex);
+    return `<label class="dev-printer-choice" for="dev-printer-${index}">
+      <input id="dev-printer-${index}" type="checkbox" data-dev-printer value="${esc(printer.id)}" ${checked ? "checked" : ""}>
       <span><b>${esc(printer.displayName || printer.id)}</b> <span class="badge ${esc(status.state)}">${esc(status.state)}</span>
       <small>${esc(printer.id)} · queue ${status.queueDepth}${status.attentionCount ? ` · ${status.attentionCount} need attention` : ""}</small></span>
     </label>`;
   }).join("");
+  devPrinterSelectionInitialized = true;
+  wireCheckboxGroup($("#dev-select-all-printers"), root, "[data-dev-printer]");
 }
 
 function buildDevJobRequest() {
@@ -577,21 +966,26 @@ function buildDevJobRequest() {
 }
 
 function setDevActiveJob(job) {
+  const preserveSelection = devActiveJob?.uid === job.uid;
   devActiveJob = job;
   $("#dev-job-card").classList.remove("hidden");
   $("#btn-dev-repeat-reprint").disabled = !devLastReprint || devLastReprint.jobUID !== job.uid;
-  renderDevJob(job);
+  renderDevJob(job, preserveSelection);
 }
 
-function renderDevJob(job) {
+function renderDevJob(job, preserveSelection) {
+  const selected = preserveSelection
+    ? new Set([...document.querySelectorAll("[data-dev-reprint-target]:checked")].map((input) => input.value))
+    : new Set();
   $("#dev-job-summary").innerHTML = `<b>${esc(job.jobId)}</b> · <code>${esc(job.uid)}</code> ·
     <span class="badge ${esc(job.state)}">${esc(job.state)}</span> ·
     ${job.fulfilledPrinterCount}/${job.originalPrinterCount} fulfilled`;
-  $("#dev-job-detail").innerHTML = (job.originalPrinters || []).map((target) => {
+  const root = $("#dev-job-detail");
+  root.innerHTML = (job.originalPrinters || []).map((target, index) => {
     const state = target.fulfilled ? "fulfilled" : target.cancelled ? "cancelled" : "unfulfilled";
     return `<div class="dev-target">
       <div class="dev-target-heading">
-        <label><input type="checkbox" data-dev-reprint-target value="${esc(target.printerId)}"> <b>${esc(target.printerId)}</b></label>
+        <label class="checkbox-label" for="dev-target-${index}"><input id="dev-target-${index}" type="checkbox" data-dev-reprint-target value="${esc(target.printerId)}" ${selected.has(target.printerId) ? "checked" : ""}> <b>${esc(target.printerId)}</b></label>
         <span class="badge ${target.fulfilled ? "connected" : target.cancelled ? "disabled" : "error"}">${state}</span>
       </div>
       <table><thead><tr><th>#</th><th>Run UID</th><th>Trigger</th><th>Status</th><th>Bytes</th><th>Error</th></tr></thead><tbody>
@@ -602,6 +996,7 @@ function renderDevJob(job) {
       </tbody></table>
     </div>`;
   }).join("");
+  wireCheckboxGroup($("#dev-select-all-targets"), root, "[data-dev-reprint-target]");
 }
 
 async function refreshDevJob(silent = false) {
@@ -777,20 +1172,265 @@ async function refreshDiagnostics() {
 }
 $("#btn-diag-refresh").addEventListener("click", refreshDiagnostics);
 
-async function refreshLogs() {
-  const rows = (await api("/logs?limit=200").catch(() => [])) || [];
-  $("#log-table tbody").innerHTML = rows.map((e) => `<tr>
-      <td class="muted">${fmtTime(e.createdAt)}</td><td>${esc(e.type)}</td>
-      <td>${esc(e.printerId || "")}</td><td class="muted">${esc(e.runUid || "")}</td>
-      <td>${esc(e.message || "")}</td>
-    </tr>`).join("") || `<tr><td colspan="5" class="muted">No events</td></tr>`;
+function localDateTimeValue(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 19);
 }
-$("#btn-logs-refresh").addEventListener("click", refreshLogs);
+
+function urlTimeValue(value) {
+  return value ? new Date(value).toISOString() : "";
+}
+
+function filteredAPIParams(names, cursor = "") {
+  const current = new URLSearchParams(window.location.search);
+  const result = new URLSearchParams({ limit: "100" });
+  names.forEach((name) => {
+    const value = current.get(name);
+    if (value) result.set(name, value);
+  });
+  if (cursor) result.set("cursor", cursor);
+  return result;
+}
+
+function navigateWithFilters(path, params) {
+  const query = params.toString();
+  navigateDashboard(path + (query ? `?${query}` : ""));
+}
+
+const printerLogFilterNames = ["printerId", "event", "runUid", "q", "from", "to"];
+
+function printerLogFiltersFromURL() {
+  const params = new URLSearchParams(window.location.search);
+  return Object.fromEntries(printerLogFilterNames.map((name) => [name, params.get(name) || ""]));
+}
+
+async function fetchPrinterLogEvents({ filters = {}, cursor = "", limit = 100 } = {}) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  for (const name of printerLogFilterNames) {
+    const value = filters[name];
+    if (value) params.set(name, value);
+  }
+  if (cursor) params.set("cursor", cursor);
+  return api(`/printer-logs?${params}`);
+}
+
+function printerLogRowsHTML(entries, { includePrinter = false, emptyMessage = "No matching printer events" } = {}) {
+  const rows = entries.map((entry) => `<tr>
+    <td class="muted log-time">${esc(detailDate(entry.createdAt))}</td><td>${esc(entry.type)}</td>
+    ${includePrinter ? `<td>${esc(entry.printerId || "")}</td>` : ""}<td class="muted">${esc(entry.runUid || "")}</td>
+    <td>${esc(entry.message || "")}</td></tr>`).join("");
+  const columns = includePrinter ? 5 : 4;
+  return rows || `<tr><td colspan="${columns}" class="muted">${esc(emptyMessage)}</td></tr>`;
+}
+
+function refreshPrinterLogPrinterOptions(selectedID) {
+  const select = $("#printer-log-printer");
+  if (!select) return;
+  const selected = selectedID === undefined ? select.value : selectedID;
+  const statuses = [...knownPrinters].sort((left, right) => {
+    const leftName = left.printer.displayName || left.printer.id;
+    const rightName = right.printer.displayName || right.printer.id;
+    return leftName.localeCompare(rightName) || left.printer.id.localeCompare(right.printer.id);
+  });
+  const configuredIDs = new Set(statuses.map((status) => status.printer.id));
+  const options = statuses.map((status) => {
+    const printer = status.printer;
+    const label = printer.displayName && printer.displayName !== printer.id
+      ? `${printer.displayName} (${printer.id})`
+      : printer.id;
+    return `<option value="${esc(printer.id)}">${esc(label)}</option>`;
+  });
+  if (selected && !configuredIDs.has(selected)) {
+    options.push(`<option value="${esc(selected)}">${esc(`Archived: ${selected}`)}</option>`);
+  }
+  select.innerHTML = `<option value="">All printers</option>${options.join("")}`;
+  select.value = selected;
+}
+
+let systemLogRows = [];
+let systemLogCursor = "";
+let systemLogURL = "";
+let systemLogExpanded = false;
+let systemLogRetentionSeconds = 7200;
+
+function syncSystemLogFilters() {
+  const signature = window.location.pathname + window.location.search;
+  if (systemLogURL === signature) return;
+  systemLogURL = signature;
+  const params = new URLSearchParams(window.location.search);
+  const selected = new Set((params.get("levels") || "debug,info,warn,error").split(","));
+  document.querySelectorAll('#system-log-filters input[name="level"]').forEach((input) => {
+    input.checked = selected.has(input.value);
+  });
+  $("#system-log-q").value = params.get("q") || "";
+  $("#system-log-printer").value = params.get("printerId") || "";
+  $("#system-log-run").value = params.get("runUid") || "";
+  $("#system-log-from").value = localDateTimeValue(params.get("from"));
+  $("#system-log-to").value = localDateTimeValue(params.get("to"));
+  systemLogRows = [];
+  systemLogCursor = "";
+  systemLogExpanded = false;
+}
+
+function renderSystemLogs() {
+  $("#system-log-table tbody").innerHTML = systemLogRows.map((record) => {
+    const attrs = record.attributes || {};
+    const fields = Object.entries(attrs).slice(0, 6).map(([key, value]) =>
+      `<span class="field-chip"><b>${esc(key)}</b>=${esc(typeof value === "string" ? value : JSON.stringify(value))}</span>`).join(" ");
+    return `<tr><td class="muted log-time">${esc(new Date(record.createdAt).toLocaleString())}</td>
+      <td><span class="badge log-${esc(record.level)}">${esc(record.level)}</span></td>
+      <td>${esc(record.message)}</td><td class="log-fields">${fields}</td>
+      <td><details class="raw-attributes"><summary>Raw</summary><pre>${esc(JSON.stringify(attrs, null, 2))}</pre></details></td></tr>`;
+  }).join("") || `<tr><td colspan="5" class="muted">No matching system logs</td></tr>`;
+  $("#btn-system-logs-older").classList.toggle("hidden", !systemLogCursor);
+}
+
+async function refreshSystemLogs({ append = false, automatic = false } = {}) {
+  if ($("#tab-system-logs").classList.contains("hidden")) return;
+  syncSystemLogFilters();
+  try {
+    const params = filteredAPIParams(["levels", "q", "printerId", "runUid", "from", "to"], append ? systemLogCursor : "");
+    const result = await api(`/system-logs?${params}`);
+    const incoming = result.logs || [];
+    systemLogRetentionSeconds = result.retentionSeconds || systemLogRetentionSeconds;
+    if (append) {
+      systemLogRows.push(...incoming);
+      systemLogExpanded = true;
+    }
+    else if (automatic) {
+      if (!systemLogExpanded) {
+        systemLogRows = incoming;
+      } else {
+        const known = new Set(incoming.map((record) => record.id));
+        const cutoff = Date.now() - systemLogRetentionSeconds * 1000;
+        systemLogRows = [...incoming, ...systemLogRows.filter((record) =>
+          !known.has(record.id) && new Date(record.createdAt).getTime() >= cutoff)];
+      }
+    } else {
+      systemLogRows = incoming;
+      systemLogExpanded = false;
+    }
+    if (!automatic || !systemLogExpanded) systemLogCursor = result.nextCursor || "";
+    renderSystemLogs();
+  } catch (error) {
+    if (!automatic) toast(error.message, true);
+  }
+}
+
+$("#system-log-filters").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const levels = [...document.querySelectorAll('#system-log-filters input[name="level"]:checked')].map((input) => input.value);
+  if (!levels.length) return toast("Select at least one log level", true);
+  const params = new URLSearchParams();
+  if (levels.length !== 4) params.set("levels", levels.join(","));
+  for (const [name, selector] of [["q", "#system-log-q"], ["printerId", "#system-log-printer"], ["runUid", "#system-log-run"]]) {
+    const value = $(selector).value.trim();
+    if (value) params.set(name, value);
+  }
+  for (const [name, selector] of [["from", "#system-log-from"], ["to", "#system-log-to"]]) {
+    const value = urlTimeValue($(selector).value);
+    if (value) params.set(name, value);
+  }
+  systemLogURL = "";
+  navigateWithFilters("/admin/system/logs", params);
+});
+$("#btn-system-logs-clear").addEventListener("click", () => { systemLogURL = ""; navigateDashboard("/admin/system/logs"); });
+$("#btn-system-logs-refresh").addEventListener("click", () => refreshSystemLogs());
+$("#btn-system-logs-older").addEventListener("click", () => refreshSystemLogs({ append: true }));
+
+let printerLogRows = [];
+let printerLogCursor = "";
+let printerLogURL = "";
+let printerLogExpanded = false;
+let printerLogRetentionSeconds = 172800;
+
+function syncPrinterLogFilters() {
+  const signature = window.location.pathname + window.location.search;
+  if (printerLogURL === signature) return;
+  printerLogURL = signature;
+  const params = new URLSearchParams(window.location.search);
+  refreshPrinterLogPrinterOptions(params.get("printerId") || "");
+  $("#printer-log-event").value = params.get("event") || "";
+  $("#printer-log-run").value = params.get("runUid") || "";
+  $("#printer-log-q").value = params.get("q") || "";
+  $("#printer-log-from").value = localDateTimeValue(params.get("from"));
+  $("#printer-log-to").value = localDateTimeValue(params.get("to"));
+  printerLogRows = [];
+  printerLogCursor = "";
+  printerLogExpanded = false;
+}
+
+function renderPrinterLogs() {
+  $("#printer-log-table tbody").innerHTML = printerLogRowsHTML(printerLogRows, { includePrinter: true });
+  $("#btn-printer-logs-older").classList.toggle("hidden", !printerLogCursor);
+}
+
+async function refreshPrinterLogs({ append = false, automatic = false } = {}) {
+  if ($("#tab-printer-logs").classList.contains("hidden")) return;
+  syncPrinterLogFilters();
+  try {
+    const result = await fetchPrinterLogEvents({
+      filters: printerLogFiltersFromURL(),
+      cursor: append ? printerLogCursor : "",
+    });
+    const incoming = result.events || [];
+    printerLogRetentionSeconds = result.retentionSeconds || printerLogRetentionSeconds;
+    if (append) {
+      printerLogRows.push(...incoming);
+      printerLogExpanded = true;
+    }
+    else if (automatic) {
+      if (!printerLogExpanded) {
+        printerLogRows = incoming;
+      } else {
+        const known = new Set(incoming.map((entry) => entry.id));
+        const cutoff = Date.now() - printerLogRetentionSeconds * 1000;
+        printerLogRows = [...incoming, ...printerLogRows.filter((entry) =>
+          !known.has(entry.id) && new Date(entry.createdAt).getTime() >= cutoff)];
+      }
+    } else {
+      printerLogRows = incoming;
+      printerLogExpanded = false;
+    }
+    if (!automatic || !printerLogExpanded) printerLogCursor = result.nextCursor || "";
+    renderPrinterLogs();
+  } catch (error) {
+    if (!automatic) toast(error.message, true);
+  }
+}
+
+$("#printer-log-filters").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const params = new URLSearchParams();
+  for (const [name, selector] of [["printerId", "#printer-log-printer"], ["event", "#printer-log-event"],
+    ["runUid", "#printer-log-run"], ["q", "#printer-log-q"]]) {
+    const value = $(selector).value.trim();
+    if (value) params.set(name, value);
+  }
+  for (const [name, selector] of [["from", "#printer-log-from"], ["to", "#printer-log-to"]]) {
+    const value = urlTimeValue($(selector).value);
+    if (value) params.set(name, value);
+  }
+  printerLogURL = "";
+  navigateWithFilters("/admin/operations/printer-logs", params);
+});
+$("#btn-printer-logs-clear").addEventListener("click", () => { printerLogURL = ""; navigateDashboard("/admin/operations/printer-logs"); });
+$("#btn-printer-logs-refresh").addEventListener("click", () => refreshPrinterLogs());
+$("#btn-printer-logs-older").addEventListener("click", () => refreshPrinterLogs({ append: true }));
 
 // ---- polling ----
 refreshStatus();
 initializeNavigation();
 setInterval(refreshStatus, 2000);
 setInterval(refreshQueue, 5000);
+setInterval(() => {
+  if (!$("#printer-detail-dialog").open) return;
+  if (printerDetailTab === "queue") refreshPrinterDetailQueue();
+  if (printerDetailTab === "logs") refreshPrinterDetailLogs();
+}, 5000);
 setInterval(refreshBluetoothDevices, 2000);
 setInterval(() => refreshDevJob(true), 2000);
+setInterval(() => refreshSystemLogs({ automatic: true }), 5000);
+setInterval(() => refreshPrinterLogs({ automatic: true }), 5000);

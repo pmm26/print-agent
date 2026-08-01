@@ -17,14 +17,13 @@ import (
 	"sync"
 	"time"
 
-	"gopkg.in/natefinch/lumberjack.v2"
-
 	"print-agent/internal/api"
 	"print-agent/internal/config"
 	"print-agent/internal/diagnostics"
 	"print-agent/internal/escpos"
 	"print-agent/internal/events"
 	"print-agent/internal/jobs"
+	appLogging "print-agent/internal/logging"
 	"print-agent/internal/platform"
 	"print-agent/internal/platform/host"
 	"print-agent/internal/printers"
@@ -60,6 +59,8 @@ func DefaultDataDir() string {
 type Service struct {
 	opts      Options
 	log       *slog.Logger
+	logStore  *appLogging.Store
+	logFile   *appLogging.RollingFile
 	db        *sql.DB
 	bus       *events.Bus
 	manager   *printers.Manager
@@ -84,24 +85,25 @@ func New(opts Options) (*Service, error) {
 		return nil, err
 	}
 
-	logger, err := buildLogger(opts)
-	if err != nil {
-		return nil, err
-	}
-
 	dbPath := filepath.Join(opts.DataDir, "print-agent.db")
 	db, err := storage.Open(dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
+	}
+	logStore := appLogging.NewStore(db)
+	logger, logFile, err := buildLogger(opts, logStore)
+	if err != nil {
+		db.Close()
+		return nil, err
 	}
 
 	bus := events.NewBus()
 	diag := diagnostics.NewService(db, dbPath)
 	bus.Subscribe(func(e events.Event) {
 		if err := diag.PersistEvent(e.Type, e.PrinterID, e.RunUID, e.Message, e.CreatedAt); err != nil {
-			logger.Error("audit event persistence failed", "type", e.Type, "error", err)
+			logger.Error("printer event persistence failed", "type", e.Type, "printerId", e.PrinterID,
+				"runUid", e.RunUID, "error", err)
 		}
-		logger.Info(e.Type, "printer", e.PrinterID, "printRun", e.RunUID, "message", e.Message)
 	})
 
 	configRepo := config.NewRepository(db)
@@ -128,14 +130,16 @@ func New(opts Options) (*Service, error) {
 	jobsService.SetPayloadValidator(escpos.ValidateTemplateData)
 
 	auth := api.NewAuthService(db)
-	server := api.NewServer(jobsService, jobsRepo, manager, configRepo, driver, diag, auth, bus, logger)
+	server := api.NewServer(jobsService, jobsRepo, manager, configRepo, driver, diag, logStore, auth, bus, logger)
 
 	return &Service{
-		opts:    opts,
-		log:     logger,
-		db:      db,
-		bus:     bus,
-		manager: manager,
+		opts:     opts,
+		log:      logger,
+		logStore: logStore,
+		logFile:  logFile,
+		db:       db,
+		bus:      bus,
+		manager:  manager,
 		server: &http.Server{
 			Handler:           server.Handler(),
 			ReadHeaderTimeout: 5 * time.Second,
@@ -147,36 +151,25 @@ func New(opts Options) (*Service, error) {
 	}, nil
 }
 
-func buildLogger(opts Options) (*slog.Logger, error) {
+func buildLogger(opts Options, store *appLogging.Store) (*slog.Logger, *appLogging.RollingFile, error) {
 	logDir := filepath.Join(opts.DataDir, "logs")
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := os.Chmod(logDir, 0o700); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	logPath := filepath.Join(logDir, "print-agent.log")
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	fileSink, err := appLogging.NewRollingFile(logPath)
 	if err != nil {
-		return nil, err
-	}
-	if err := f.Close(); err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(logPath, 0o600); err != nil {
-		return nil, err
-	}
-	fileSink := &lumberjack.Logger{
-		Filename:   logPath,
-		MaxSize:    10, // MB
-		MaxBackups: 5,
-		MaxAge:     30, // days
+		return nil, nil, err
 	}
 	var sink io.Writer = fileSink
 	if opts.Console {
-		sink = io.MultiWriter(fileSink, os.Stderr)
+		sink = io.MultiWriter(os.Stderr, fileSink)
 	}
-	return slog.New(slog.NewJSONHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug})), nil
+	jsonHandler := slog.NewJSONHandler(sink, &slog.HandlerOptions{Level: slog.LevelDebug})
+	return slog.New(appLogging.NewHandler(jsonHandler, store)), fileSink, nil
 }
 
 // Run starts workers and the HTTP listener, then blocks until ctx is
@@ -197,9 +190,8 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	s.bus.Publish(events.Event{Type: events.AgentStarted,
 		Message: fmt.Sprintf("listening on http://%s (version %s)", addr, diagnostics.Version)})
-	if s.opts.Console {
-		fmt.Printf("print-agent running — dashboard: http://%s/admin\n", addr)
-	}
+	s.log.Info("agent started", "address", addr, "version", diagnostics.Version,
+		"dashboard", fmt.Sprintf("http://%s/admin", addr))
 
 	retentionDone := make(chan struct{})
 	go func() {
@@ -221,6 +213,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.bus.Publish(events.Event{Type: events.AgentStopping})
+	s.log.Info("agent stopping")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	s.server.Shutdown(shutdownCtx)
@@ -241,16 +234,28 @@ func (s *Service) Close() error {
 	return s.closeErr
 }
 
-// retentionLoop purges old terminal data daily.
+// retentionLoop enforces the short system-log window every minute while
+// retaining the existing daily Job, Print Run, and printer-event cleanup.
 func (s *Service) retentionLoop(ctx context.Context) {
 	repo := jobs.NewRepository(s.db)
-	ticker := time.NewTicker(24 * time.Hour)
+	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
+	var lastJobPurge time.Time
 	for {
-		if err := repo.PurgeExpired(time.Now().UTC()); err != nil {
-			s.log.Error("retention purge failed", "error", err)
-		} else if err := storage.IncrementalVacuum(s.db); err != nil {
-			s.log.Error("incremental vacuum failed", "error", err)
+		now := time.Now().UTC()
+		if err := s.logStore.Purge(now); err != nil {
+			s.log.Error("system log retention purge failed", "error", err)
+		}
+		if err := s.logFile.Purge(now); err != nil {
+			s.log.Error("system log file retention purge failed", "error", err)
+		}
+		if lastJobPurge.IsZero() || now.Sub(lastJobPurge) >= 24*time.Hour {
+			if err := repo.PurgeExpired(now); err != nil {
+				s.log.Error("retention purge failed", "error", err)
+			} else if err := storage.IncrementalVacuum(s.db); err != nil {
+				s.log.Error("incremental vacuum failed", "error", err)
+			}
+			lastJobPurge = now
 		}
 		select {
 		case <-ctx.Done():

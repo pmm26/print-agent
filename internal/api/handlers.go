@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"print-agent/internal/config"
+	"print-agent/internal/diagnostics"
 	"print-agent/internal/escpos"
 	"print-agent/internal/jobs"
+	appLogging "print-agent/internal/logging"
 	"print-agent/internal/platform"
 	"print-agent/internal/printers"
 )
@@ -557,6 +559,226 @@ func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---- diagnostics (management) ----
+
+func logPageLimit(raw string) int {
+	limit, _ := strconv.Atoi(raw)
+	if limit <= 0 {
+		return 100
+	}
+	if limit > 200 {
+		return 200
+	}
+	return limit
+}
+
+func encodeNumericCursor(created time.Time, id int64) string {
+	value := created.UTC().Format(time.RFC3339Nano) + "\x00" + strconv.FormatInt(id, 10)
+	return base64.RawURLEncoding.EncodeToString([]byte(value))
+}
+
+func decodeNumericCursor(raw string) (*time.Time, int64, error) {
+	if raw == "" {
+		return nil, 0, nil
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return nil, 0, jobs.NewValidationError("invalid cursor")
+	}
+	parts := strings.SplitN(string(decoded), "\x00", 2)
+	if len(parts) != 2 {
+		return nil, 0, jobs.NewValidationError("invalid cursor")
+	}
+	created, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return nil, 0, jobs.NewValidationError("invalid cursor")
+	}
+	id, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || id <= 0 {
+		return nil, 0, jobs.NewValidationError("invalid cursor")
+	}
+	return &created, id, nil
+}
+
+func parseLogTime(raw, name string) (*time.Time, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	value, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil, jobs.NewValidationError(name + " must be an RFC3339 timestamp")
+	}
+	value = value.UTC()
+	return &value, nil
+}
+
+func logRange(values url.Values) (*time.Time, *time.Time, error) {
+	from, err := parseLogTime(values.Get("from"), "from")
+	if err != nil {
+		return nil, nil, err
+	}
+	to, err := parseLogTime(values.Get("to"), "to")
+	if err != nil {
+		return nil, nil, err
+	}
+	if from != nil && to != nil && from.After(*to) {
+		return nil, nil, jobs.NewValidationError("from must not be after to")
+	}
+	return from, to, nil
+}
+
+func boundedLogFilter(values url.Values, name string) (string, error) {
+	value := strings.TrimSpace(values.Get(name))
+	if len(value) > 250 {
+		return "", jobs.NewValidationError(name + " must be at most 250 bytes")
+	}
+	return value, nil
+}
+
+func parseLevels(values url.Values) ([]string, error) {
+	seen := map[string]bool{}
+	var levels []string
+	for _, raw := range values["levels"] {
+		for _, level := range strings.Split(raw, ",") {
+			level = strings.ToLower(strings.TrimSpace(level))
+			if level == "" || seen[level] {
+				continue
+			}
+			switch level {
+			case "debug", "info", "warn", "error":
+			default:
+				return nil, jobs.NewValidationError("levels may contain only debug, info, warn, or error")
+			}
+			seen[level] = true
+			levels = append(levels, level)
+		}
+	}
+	return levels, nil
+}
+
+func (s *Server) handleSystemLogs(w http.ResponseWriter, r *http.Request) {
+	values := r.URL.Query()
+	levels, err := parseLevels(values)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	from, to, err := logRange(values)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	query, err := boundedLogFilter(values, "q")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	printerID, err := boundedLogFilter(values, "printerId")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	runUID, err := boundedLogFilter(values, "runUid")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	before, beforeID, err := decodeNumericCursor(values.Get("cursor"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	limit := logPageLimit(values.Get("limit"))
+	records, err := s.logs.Query(appLogging.Filter{
+		Levels: levels, Query: query, PrinterID: printerID, RunUID: runUID,
+		From: from, To: to, Before: before, BeforeID: beforeID, Limit: limit + 1,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	next := ""
+	if len(records) > limit {
+		records = records[:limit]
+		last := records[len(records)-1]
+		next = encodeNumericCursor(last.CreatedAt, last.ID)
+	}
+	if records == nil {
+		records = []appLogging.Record{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"logs": records, "nextCursor": next, "retentionSeconds": int(appLogging.Retention.Seconds()),
+	})
+}
+
+func normalizeEventType(value string) string {
+	aliases := map[string]string{
+		"printer_connected": "printer.connected", "printer_disconnected": "printer.disconnected",
+		"printer_reconnecting": "printer.reconnecting", "printer_error": "printer.error",
+		"config_changed": "config.changed", "print_run_queued": "print_run.queued",
+		"print_run_processing": "print_run.processing", "print_run_transmitted": "print_run.transmitted",
+		"print_run_failed": "print_run.failed", "print_run_uncertain": "print_run.uncertain",
+		"print_run_cancelled": "print_run.cancelled", "print_run_resolved": "print_run.resolved",
+	}
+	if normalized, ok := aliases[value]; ok {
+		return normalized
+	}
+	return value
+}
+
+func (s *Server) handlePrinterLogs(w http.ResponseWriter, r *http.Request) {
+	values := r.URL.Query()
+	from, to, err := logRange(values)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	query, err := boundedLogFilter(values, "q")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	printerID, err := boundedLogFilter(values, "printerId")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	runUID, err := boundedLogFilter(values, "runUid")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	eventType, err := boundedLogFilter(values, "event")
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	before, beforeID, err := decodeNumericCursor(values.Get("cursor"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	limit := logPageLimit(values.Get("limit"))
+	events, err := s.diag.PrinterEvents(diagnostics.EventFilter{
+		PrinterID: printerID, EventType: normalizeEventType(eventType), RunUID: runUID, Query: query,
+		From: from, To: to, Before: before, BeforeID: beforeID, Limit: limit + 1,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	next := ""
+	if len(events) > limit {
+		events = events[:limit]
+		last := events[len(events)-1]
+		next = encodeNumericCursor(last.CreatedAt, last.ID)
+	}
+	if events == nil {
+		events = []diagnostics.EventRow{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"events": events, "nextCursor": next, "retentionSeconds": int(diagnostics.EventRetention.Seconds()),
+	})
+}
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))

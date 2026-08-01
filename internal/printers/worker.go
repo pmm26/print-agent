@@ -139,6 +139,8 @@ func (w *worker) connectLoop(ctx context.Context) bool {
 			w.setState(StateConnecting)
 		} else {
 			w.setState(StateReconnecting)
+			w.bus.Publish(events.Event{Type: events.PrinterReconnecting, PrinterID: w.cfg.ID,
+				Message: fmt.Sprintf("connection attempt %d", attempt+1)})
 		}
 		err := w.connectOnce(ctx)
 		if err == nil {
@@ -169,9 +171,8 @@ func (w *worker) connectLoop(ctx context.Context) bool {
 			w.nextRetry = nil
 		}
 		w.mu.Unlock()
-		if attempt == 1 {
-			w.bus.Publish(events.Event{Type: events.PrinterError, PrinterID: w.cfg.ID, Message: err.Error()})
-		}
+		w.bus.Publish(events.Event{Type: events.PrinterError, PrinterID: w.cfg.ID,
+			Message: fmt.Sprintf("connection attempt %d failed: %v", attempt, err)})
 
 		if manualOnly {
 			// Park until an operator presses Reconnect.

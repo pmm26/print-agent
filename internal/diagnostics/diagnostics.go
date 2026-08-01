@@ -8,19 +8,37 @@ import (
 	"encoding/json"
 	"io"
 	"runtime"
+	"strings"
 	"time"
 )
+
+const EventRetention = 48 * time.Hour
+
+const sqliteEventTimeLayout = "2006-01-02T15:04:05.000Z"
 
 // Version is stamped at build time via -ldflags "-X ...".
 var Version = "dev"
 
 type EventRow struct {
-	ID        int64  `json:"id"`
-	RunUID    string `json:"runUid,omitempty"`
-	PrinterID string `json:"printerId,omitempty"`
-	Type      string `json:"type"`
-	Message   string `json:"message,omitempty"`
-	CreatedAt string `json:"createdAt"`
+	ID        int64     `json:"id"`
+	RunUID    string    `json:"runUid,omitempty"`
+	PrinterID string    `json:"printerId,omitempty"`
+	Type      string    `json:"type"`
+	Message   string    `json:"message,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type EventFilter struct {
+	PrinterID string
+	EventType string
+	RunUID    string
+	Query     string
+	From      *time.Time
+	To        *time.Time
+	Before    *time.Time
+	BeforeID  int64
+	Limit     int
+	Now       time.Time
 }
 
 type Service struct {
@@ -38,7 +56,7 @@ func (s *Service) PersistEvent(eventType, printerID, runUID, message string, at 
 	_, err := s.db.Exec(`INSERT INTO print_events (run_uid, printer_id, event_type, message, created_at)
 		VALUES (?, ?, ?, ?, ?)`,
 		nullable(runUID), nullable(printerID), eventType, nullable(message),
-		at.UTC().Format(time.RFC3339Nano))
+		at.UTC().Format(sqliteEventTimeLayout))
 	return err
 }
 
@@ -56,20 +74,91 @@ func (s *Service) RecentEvents(limit int) ([]EventRow, error) {
 	}
 	rows, err := s.db.Query(`SELECT id, COALESCE(run_uid, ''), COALESCE(printer_id, ''),
 		event_type, COALESCE(message, ''), created_at
-		FROM print_events ORDER BY id DESC LIMIT ?`, limit)
+		FROM print_events WHERE created_at >= ? ORDER BY created_at DESC, id DESC LIMIT ?`,
+		time.Now().UTC().Add(-EventRetention).Format(sqliteEventTimeLayout), limit)
 	if err != nil {
 		return nil, err
 	}
+	return readEventRows(rows)
+}
+
+func (s *Service) PrinterEvents(filter EventFilter) ([]EventRow, error) {
+	if filter.Limit <= 0 || filter.Limit > 1001 {
+		filter.Limit = 100
+	}
+	if filter.Now.IsZero() {
+		filter.Now = time.Now().UTC()
+	}
+	from := filter.Now.Add(-EventRetention)
+	if filter.From != nil && filter.From.After(from) {
+		from = filter.From.UTC()
+	}
+	where := []string{`created_at >= ?`, `event_type IN (
+		'printer.connected','printer.disconnected','printer.reconnecting','printer.error','config.changed',
+		'print_run.queued','print_run.processing','print_run.transmitted','print_run.failed',
+		'print_run.uncertain','print_run.cancelled','print_run.resolved')`}
+	args := []any{from.Format(sqliteEventTimeLayout)}
+	if filter.To != nil {
+		where = append(where, "created_at <= ?")
+		args = append(args, filter.To.UTC().Format(sqliteEventTimeLayout))
+	}
+	if filter.PrinterID != "" {
+		where = append(where, "printer_id = ?")
+		args = append(args, filter.PrinterID)
+	}
+	if filter.EventType != "" {
+		where = append(where, "event_type = ?")
+		args = append(args, filter.EventType)
+	}
+	if filter.RunUID != "" {
+		where = append(where, "run_uid = ?")
+		args = append(args, filter.RunUID)
+	}
+	if filter.Query != "" {
+		where = append(where, `(LOWER(event_type) LIKE ? ESCAPE '\' OR LOWER(COALESCE(message, '')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(printer_id, '')) LIKE ? ESCAPE '\' OR LOWER(COALESCE(run_uid, '')) LIKE ? ESCAPE '\')`)
+		term := "%" + escapeLike(strings.ToLower(filter.Query)) + "%"
+		args = append(args, term, term, term, term)
+	}
+	if filter.Before != nil {
+		where = append(where, "(created_at < ? OR (created_at = ? AND id < ?))")
+		stamp := filter.Before.UTC().Format(sqliteEventTimeLayout)
+		args = append(args, stamp, stamp, filter.BeforeID)
+	}
+	args = append(args, filter.Limit)
+	rows, err := s.db.Query(`SELECT id, COALESCE(run_uid, ''), COALESCE(printer_id, ''),
+		event_type, COALESCE(message, ''), created_at
+		FROM print_events WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY created_at DESC, id DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return readEventRows(rows)
+}
+
+func readEventRows(rows *sql.Rows) ([]EventRow, error) {
 	defer rows.Close()
 	var out []EventRow
 	for rows.Next() {
 		var e EventRow
-		if err := rows.Scan(&e.ID, &e.RunUID, &e.PrinterID, &e.Type, &e.Message, &e.CreatedAt); err != nil {
+		var created string
+		if err := rows.Scan(&e.ID, &e.RunUID, &e.PrinterID, &e.Type, &e.Message, &created); err != nil {
 			return nil, err
 		}
+		parsed, err := time.Parse(time.RFC3339Nano, created)
+		if err != nil {
+			return nil, err
+		}
+		e.CreatedAt = parsed
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+func escapeLike(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	return strings.ReplaceAll(value, `_`, `\_`)
 }
 
 // Report is the diagnostics page payload. PrinterStatuses and settings are

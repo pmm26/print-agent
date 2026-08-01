@@ -23,13 +23,14 @@
       <div class="nav-dropdown">
         <a href="/admin/operations/jobs" data-route aria-current="page">Jobs</a>
         <a href="/admin/operations/queue" data-route>Queue</a>
+        <a href="/admin/operations/printer-logs" data-route>Printer Logs</a>
       </div>
     </details>
     <details class="nav-menu" data-category="system">
       <summary>System</summary>
       <div class="nav-dropdown">
         <a href="/admin/system/diagnostics" data-route>Diagnostics</a>
-        <a href="/admin/system/logs" data-route>Logs</a>
+        <a href="/admin/system/logs" data-route>System Logs</a>
       </div>
     </details>
     <details class="nav-menu" data-category="dev">
@@ -146,15 +147,58 @@
     <pre id="diag-body">…</pre>
   </section>
 
-  <section id="tab-logs" class="panel hidden">
+  <section id="tab-system-logs" class="panel hidden">
     <div class="page-heading">
-      <div><h2>Logs</h2><p class="muted">Recent operational and Print Run events.</p></div>
-      <div class="toolbar"><button id="btn-logs-refresh">Refresh</button></div>
+      <div><h2>System Logs</h2><p class="muted">Structured application records retained for two hours.</p></div>
+      <div class="toolbar"><button id="btn-system-logs-refresh">Refresh</button></div>
     </div>
-    <table id="log-table">
+    <form id="system-log-filters" class="card log-filters">
+      <fieldset><legend>Levels</legend>
+        <label><input type="checkbox" name="level" value="debug" checked> debug</label>
+        <label><input type="checkbox" name="level" value="info" checked> info</label>
+        <label><input type="checkbox" name="level" value="warn" checked> warn</label>
+        <label><input type="checkbox" name="level" value="error" checked> error</label>
+      </fieldset>
+      <label>Search <input id="system-log-q" placeholder="timeout"></label>
+      <label>Printer ID <input id="system-log-printer" placeholder="kitchen"></label>
+      <label>Print Run UID <input id="system-log-run" placeholder="run_…"></label>
+      <label>From <input id="system-log-from" type="datetime-local" step="1"></label>
+      <label>To <input id="system-log-to" type="datetime-local" step="1"></label>
+      <div class="row"><button class="primary" type="submit">Apply</button><button id="btn-system-logs-clear" type="button">Clear</button></div>
+    </form>
+    <div class="table-scroll"><table id="system-log-table">
+      <thead><tr><th>Time</th><th>Level</th><th>Message</th><th>Fields</th><th>Attributes</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <div class="load-older"><button id="btn-system-logs-older" class="hidden">Load older</button></div>
+  </section>
+
+  <section id="tab-printer-logs" class="panel hidden">
+    <div class="page-heading">
+      <div><h2>Printer Logs</h2><p class="muted">Printer connections, configuration, and Print Run events retained for 48 hours.</p></div>
+      <div class="toolbar"><button id="btn-printer-logs-refresh">Refresh</button></div>
+    </div>
+    <form id="printer-log-filters" class="card log-filters">
+      <label>Printer ID <select id="printer-log-printer"><option value="">All printers</option></select></label>
+      <label>Event <select id="printer-log-event"><option value="">All events</option>
+        <option value="printer_connected">printer.connected</option><option value="printer_disconnected">printer.disconnected</option>
+        <option value="printer_reconnecting">printer.reconnecting</option><option value="printer_error">printer.error</option>
+        <option value="config_changed">config.changed</option><option value="print_run_queued">print_run.queued</option>
+        <option value="print_run_processing">print_run.processing</option><option value="print_run_transmitted">print_run.transmitted</option>
+        <option value="print_run_failed">print_run.failed</option><option value="print_run_uncertain">print_run.uncertain</option>
+        <option value="print_run_cancelled">print_run.cancelled</option><option value="print_run_resolved">print_run.resolved</option>
+      </select></label>
+      <label>Print Run UID <input id="printer-log-run" placeholder="run_…"></label>
+      <label>Search <input id="printer-log-q" placeholder="timeout"></label>
+      <label>From <input id="printer-log-from" type="datetime-local" step="1"></label>
+      <label>To <input id="printer-log-to" type="datetime-local" step="1"></label>
+      <div class="row"><button class="primary" type="submit">Apply</button><button id="btn-printer-logs-clear" type="button">Clear</button></div>
+    </form>
+    <div class="table-scroll"><table id="printer-log-table">
       <thead><tr><th>Time</th><th>Event</th><th>Printer</th><th>Print Run</th><th>Message</th></tr></thead>
       <tbody></tbody>
-    </table>
+    </table></div>
+    <div class="load-older"><button id="btn-printer-logs-older" class="hidden">Load older</button></div>
   </section>
 
   <section id="tab-dev" class="panel hidden">
@@ -172,6 +216,9 @@
 
     <div class="card">
       <h2>Create kitchen ticket</h2>
+      <div class="selection-toolbar">
+        <label class="checkbox-label"><input id="dev-select-all-printers" type="checkbox"> Select all printers</label>
+      </div>
       <div id="dev-printer-list" class="dev-printer-grid">
         <span class="muted">Loading configured printers…</span>
       </div>
@@ -208,6 +255,9 @@
 
       <div class="dev-reprint-panel">
         <h2>Reprint selected targets</h2>
+        <div class="selection-toolbar">
+          <label class="checkbox-label"><input id="dev-select-all-targets" type="checkbox"> Select all targets</label>
+        </div>
         <div class="dev-form-grid">
           <label>Reason (optional)
             <input id="dev-reprint-reason" maxlength="500" placeholder="Ticket damaged">
@@ -262,6 +312,55 @@
       <button type="submit" class="primary">Save &amp; connect</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="printer-detail-dialog" class="printer-detail-dialog">
+  <div class="printer-detail-header">
+    <div>
+      <div class="printer-detail-title-row">
+        <h2 id="printer-detail-title">Printer</h2>
+        <span id="printer-detail-state" class="badge disabled">…</span>
+      </div>
+      <p id="printer-detail-subtitle" class="muted"></p>
+    </div>
+    <div class="printer-detail-header-actions">
+      <button id="btn-printer-detail-test">Test print</button>
+      <button id="btn-printer-detail-reconnect">Reconnect</button>
+      <button id="btn-printer-detail-close">Close</button>
+    </div>
+  </div>
+
+  <div class="printer-detail-tabs" role="tablist" aria-label="Printer details">
+    <button id="printer-detail-tab-overview" role="tab" data-printer-detail-tab="overview" aria-selected="true" aria-controls="printer-detail-overview">Overview</button>
+    <button id="printer-detail-tab-queue" role="tab" data-printer-detail-tab="queue" aria-selected="false" aria-controls="printer-detail-queue">Queue</button>
+    <button id="printer-detail-tab-logs" role="tab" data-printer-detail-tab="logs" aria-selected="false" aria-controls="printer-detail-logs">Logs</button>
+  </div>
+
+  <section id="printer-detail-overview" class="printer-detail-panel" role="tabpanel" aria-labelledby="printer-detail-tab-overview">
+    <dl id="printer-detail-info" class="printer-info-grid"></dl>
+    <div id="printer-detail-error" class="system-alert hidden" role="alert"></div>
+    <div class="printer-management-actions">
+      <button id="btn-printer-detail-configure">Configure</button>
+      <button id="btn-printer-detail-toggle">Disable</button>
+      <button id="btn-printer-detail-remove" class="danger">Remove printer</button>
+    </div>
+  </section>
+
+  <section id="printer-detail-queue" class="printer-detail-panel hidden" role="tabpanel" aria-labelledby="printer-detail-tab-queue">
+    <div class="printer-detail-section-heading">
+      <div><h3>Recent Print Runs</h3><p class="muted">Active work, attention items, and recent transmissions.</p></div>
+      <div class="row"><button id="btn-printer-detail-refresh-queue">Refresh</button><button id="btn-printer-detail-full-queue">Open full Queue</button></div>
+    </div>
+    <div id="printer-detail-queue-body" class="table-scroll"><span class="muted">Select Queue to load Print Runs.</span></div>
+  </section>
+
+  <section id="printer-detail-logs" class="printer-detail-panel hidden" role="tabpanel" aria-labelledby="printer-detail-tab-logs">
+    <div class="printer-detail-section-heading">
+      <div><h3>Recent Printer Logs</h3><p class="muted">Connection, configuration, and Print Run events.</p></div>
+      <div class="row"><button id="btn-printer-detail-refresh-logs">Refresh</button><button id="btn-printer-detail-full-logs">Open full Printer Logs</button></div>
+    </div>
+    <div id="printer-detail-logs-body" class="table-scroll"><span class="muted">Select Logs to load recent events.</span></div>
+  </section>
 </dialog>
 
 <dialog id="job-dialog">

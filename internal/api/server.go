@@ -17,6 +17,7 @@ import (
 	"print-agent/internal/diagnostics"
 	"print-agent/internal/events"
 	"print-agent/internal/jobs"
+	appLogging "print-agent/internal/logging"
 	"print-agent/internal/platform"
 	"print-agent/internal/printers"
 	"print-agent/internal/webui"
@@ -29,6 +30,7 @@ type Server struct {
 	configRepo  *config.Repository
 	driver      platform.Driver
 	diag        *diagnostics.Service
+	logs        *appLogging.Store
 	auth        *AuthService
 	bus         *events.Bus
 	limiter     *keyedRateLimiter
@@ -38,7 +40,7 @@ type Server struct {
 
 func NewServer(jobsService *jobs.Service, jobsRepo *jobs.Repository, manager *printers.Manager,
 	configRepo *config.Repository, driver platform.Driver, diag *diagnostics.Service,
-	auth *AuthService, bus *events.Bus, log *slog.Logger) *Server {
+	logs *appLogging.Store, auth *AuthService, bus *events.Bus, log *slog.Logger) *Server {
 	return &Server{
 		jobsService: jobsService,
 		jobsRepo:    jobsRepo,
@@ -46,6 +48,7 @@ func NewServer(jobsService *jobs.Service, jobsRepo *jobs.Repository, manager *pr
 		configRepo:  configRepo,
 		driver:      driver,
 		diag:        diag,
+		logs:        logs,
 		auth:        auth,
 		bus:         bus,
 		limiter:     newKeyedRateLimiter(20, 40),
@@ -104,6 +107,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/print-runs/{runUID}/cancel", admin(s.handleCancelRun))
 	mux.Handle("POST /api/v1/jobs/{jobUID}/cancel", admin(s.handleCancelJob))
 	mux.Handle("GET /api/v1/logs", admin(s.handleLogs))
+	mux.Handle("GET /api/v1/system-logs", admin(s.handleSystemLogs))
+	mux.Handle("GET /api/v1/printer-logs", admin(s.handlePrinterLogs))
 	mux.Handle("GET /api/v1/diagnostics", admin(s.handleDiagnostics))
 	mux.Handle("GET /api/v1/diagnostics/export", admin(s.handleDiagnosticsExport))
 	mux.Handle("POST /api/v1/admin/pairing-code", admin(s.handlePairingCode))
@@ -128,11 +133,22 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(&loggingResponseWriter{ResponseWriter: w, log: s.log}, r)
 		if r.URL.Path != "/api/v1/status" && r.URL.Path != "/api/v1/health" { // too chatty
 			s.log.Debug("http", "method", r.Method, "path", r.URL.Path, "origin", r.Header.Get("Origin"))
 		}
 	})
+}
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	log *slog.Logger
+}
+
+func (w *loggingResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *loggingResponseWriter) logError(err error) {
+	w.log.Error("API request failed", "error", err)
 }
 
 func (s *Server) noContent(w http.ResponseWriter, r *http.Request) {
@@ -192,7 +208,9 @@ func writeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrPairingRejected):
 		writeJSON(w, http.StatusForbidden, errorResponse{Code: "pairing_rejected", Error: err.Error()})
 	default:
-		slog.Error("API request failed", "error", err)
+		if logger, ok := w.(interface{ logError(error) }); ok {
+			logger.logError(err)
+		}
 		writeJSON(w, http.StatusInternalServerError, errorResponse{Code: "internal_error", Error: "internal server error"})
 	}
 }

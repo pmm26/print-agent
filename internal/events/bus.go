@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Event types, used both on the bus and in the print_events table.
+// Event types, used both on the bus and in the printer event log.
 const (
 	PrinterConnected    = "printer.connected"
 	PrinterDisconnected = "printer.disconnected"

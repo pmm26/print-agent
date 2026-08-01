@@ -23,14 +23,15 @@ func Handler() http.Handler {
 	}
 	files := http.FileServerFS(sub)
 	routes := map[string]bool{
-		"/setup/pair":         true,
-		"/setup/printers":     true,
-		"/setup/pos":          true,
-		"/operations/jobs":    true,
-		"/operations/queue":   true,
-		"/system/diagnostics": true,
-		"/system/logs":        true,
-		"/dev/pos-simulator":  true,
+		"/setup/pair":              true,
+		"/setup/printers":          true,
+		"/setup/pos":               true,
+		"/operations/jobs":         true,
+		"/operations/queue":        true,
+		"/operations/printer-logs": true,
+		"/system/diagnostics":      true,
+		"/system/logs":             true,
+		"/dev/pos-simulator":       true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" || r.URL.Path == "" {

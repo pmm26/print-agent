@@ -19,7 +19,10 @@ go run ./cmd/print-agent --port 17555 --data-dir /tmp/agent-data
 ```
 
 Data (SQLite DB, rolling logs) lives in the platform's user data directory by
-default.
+default. Structured application logs are available under **System → System
+Logs** and retained for two hours. Printer and Print Run events are available
+under **Operations → Printer Logs** and retained with the existing 48-hour Job
+history.
 
 ## Hardware validation (btprobe)
 

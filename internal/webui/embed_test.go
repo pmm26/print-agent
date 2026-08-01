@@ -11,7 +11,7 @@ func TestDashboardRoutesServeIndex(t *testing.T) {
 	handler := Handler()
 	for _, path := range []string{
 		"/setup/pair", "/setup/printers", "/setup/pos",
-		"/operations/jobs", "/operations/queue",
+		"/operations/jobs", "/operations/queue", "/operations/printer-logs",
 		"/system/diagnostics", "/system/logs",
 		"/dev/pos-simulator",
 	} {
@@ -28,6 +28,83 @@ func TestDashboardRoutesServeIndex(t *testing.T) {
 				t.Fatalf("Cache-Control = %q", cache)
 			}
 		})
+	}
+}
+
+func TestLoggingRoutesAndURLStateWiring(t *testing.T) {
+	index, err := webFiles.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := webFiles.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`href="/admin/operations/printer-logs"`, `href="/admin/system/logs"`,
+		`id="system-log-filters"`, `id="printer-log-filters"`,
+		`<select id="printer-log-printer"><option value="">All printers</option></select>`,
+	} {
+		if !strings.Contains(string(index), expected) {
+			t.Fatalf("index missing %s", expected)
+		}
+	}
+	for _, expected := range []string{
+		`new URLSearchParams(window.location.search)`, `window.addEventListener("popstate"`,
+		`new URLSearchParams({ printerId: id })`,
+	} {
+		if !strings.Contains(string(app), expected) {
+			t.Fatalf("app missing URL-state wiring %s", expected)
+		}
+	}
+}
+
+func TestPrinterDetailModalWiring(t *testing.T) {
+	index, err := webFiles.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app, err := webFiles.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`id="printer-detail-dialog"`, `data-printer-detail-tab="overview"`,
+		`data-printer-detail-tab="queue"`, `data-printer-detail-tab="logs"`,
+		`id="btn-printer-detail-test"`, `id="btn-printer-detail-reconnect"`,
+		`id="btn-printer-detail-configure"`, `id="btn-printer-detail-toggle"`,
+		`id="btn-printer-detail-remove"`,
+	} {
+		if !strings.Contains(string(index), expected) {
+			t.Fatalf("printer detail modal missing %s", expected)
+		}
+	}
+	for _, expected := range []string{
+		`function syncPrinterDetailFromURL()`, `function refreshPrinterDetailQueue()`,
+		`function refreshPrinterDetailLogs()`, `function fetchPrinterLogEvents(`,
+		`function printerLogRowsHTML(`, `/admin/operations/queue?`,
+		`/admin/operations/printer-logs?`,
+	} {
+		if !strings.Contains(string(app), expected) {
+			t.Fatalf("printer detail behavior missing %s", expected)
+		}
+	}
+}
+
+func TestJobModalRefreshPreservesDialogState(t *testing.T) {
+	app, err := webFiles.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`const sameJob = activeJobDetail?.uid === job.uid`,
+		`jobRunSignatures.get(body) !== signature`,
+		`await openJob(jobUID, { show: false })`,
+		`jobDialogRequest++`,
+	} {
+		if !strings.Contains(string(app), expected) {
+			t.Fatalf("job modal refresh missing %s", expected)
+		}
 	}
 }
 
