@@ -5,11 +5,10 @@ A hosted POS webpage submits structured, idempotent print jobs to a loopback
 HTTP API; the agent owns all printer logic — queues, reconnects, rendering,
 duplicate prevention — and keeps working with no browser open and no internet.
 
-Current platform support: **macOS and Linux**.
+Current platform support: **Windows, macOS, and Linux**.
 All OS-specific code lives behind the `platform.Driver` interface in
-`internal/platform/` — one subfolder per OS. Adding a platform means filling
-in one folder; the core never mentions an operating system. Windows remains a
-compiling scaffold.
+`internal/platform/` — one subfolder per OS. The core never mentions an
+operating system.
 
 ## Run
 
@@ -30,17 +29,26 @@ Run these before trusting a new printer model:
 
 ```sh
 go run ./cmd/btprobe list                                  # paired candidate printers
+go run ./cmd/btprobe test COM7                             # Windows formatted test page
 go run ./cmd/btprobe test /dev/cu.MyPrinter                # macOS formatted test page
 go run ./cmd/btprobe test ble://AA:BB:CC:DD:EE:FF          # Linux BLE formatted test page
 go run ./cmd/btprobe charset rfcomm://AA:BB:CC:DD:EE:FF    # Linux SPP charset page
-go run ./cmd/btprobe multi ble://AA:BB:CC:DD:EE:01 rfcomm://AA:BB:CC:DD:EE:02
-go run ./cmd/btprobe status /dev/cu.MyPrinter              # serial paths only; DLE EOT status
+go run ./cmd/btprobe multi COM7 COM8                       # concurrent repeated prints
+go run ./cmd/btprobe status COM7                           # serial endpoints only
 ```
 
-`test`, `charset`, and `multi` use the active platform driver, so Linux
-`rfcomm://<MAC>` and `ble://<MAC>` endpoints connect through BlueZ rather than
-being mistaken for filesystem serial ports. `status` needs bidirectional
-access from the serial library and therefore supports serial paths only.
+`test`, `charset`, and `multi` use the active platform driver, so Windows COM
+ports, macOS `/dev/cu.*` devices, and Linux `rfcomm://<MAC>` or `ble://<MAC>`
+endpoints are handled by their platform implementations. `status` needs
+bidirectional access from the serial library and therefore supports serial
+endpoints only.
+
+### Windows requirements
+
+- Pair the printer in Windows Bluetooth settings.
+- Confirm that Windows exposes an outgoing serial COM port such as `COM7`.
+- Run `btprobe list` and use the discovered COM endpoint. If no COM port is
+  present, confirm that the printer supports Bluetooth Serial Port Profile.
 
 ### Linux / BlueZ requirements
 
@@ -59,26 +67,28 @@ writes are scoped to that service and chunked to the negotiated ATT MTU.
 Classic mode registers an SPP client profile and uses the RFCOMM socket BlueZ
 supplies. Neither mode requires the deprecated `rfcomm` or `sdptool` tools.
 Legacy Linux `/dev/rfcommN` endpoints are rejected; reconfigure them as
-`rfcomm://<MAC>`. macOS `/dev/cu.*` endpoints remain supported.
+`rfcomm://<MAC>`.
 
 For a hardware validation pass on Linux: discover and power on the printer,
 pair it if the dashboard requires pairing, run `btprobe list`, then run `test`
-and `charset` with the discovered endpoint.
-Power-cycle the printer and repeat `test` to verify reconnection. If using
-several printers, run `multi` with every endpoint and confirm each physical
-printer receives only its own rounds.
+and `charset` with the discovered endpoint. Power-cycle the printer and repeat
+`test` to verify reconnection. If using several printers, run `multi` with
+every endpoint and confirm each physical printer receives only its own rounds.
 
 ## Printer setup
 
-1. On Linux, dashboard → **Pair devices** → scan for printers. Select **Add
+1. On Windows or macOS, pair the printer in the operating system Bluetooth
+   settings. On Windows, confirm it exposes an outgoing COM port such as
+   `COM7`.
+2. On Linux, dashboard → **Pair devices** → scan for printers. Select **Add
    printer** when the device is ready. If a classic printer has no endpoint,
    pair it first; blank PIN uses the common thermal-printer PIN `0000`. Some
    inexpensive BLE printers remain unbonded and correctly appear as **ready
-   without pairing**. On macOS, pair printers in the OS Bluetooth settings.
-2. Dashboard → **Printers** → **Add printer** → pick the discovered endpoint,
+   without pairing**.
+3. Dashboard → **Printers** → **Add printer** → pick the discovered endpoint,
    assign an ID (`cashier`, `kitchen`, `bar`), and choose an encoding (CP858
    covers Spanish + €).
-3. **Test print.**
+4. **Test print.**
 
 All three printers may advertise the same Bluetooth name — printers are
 stored by endpoint + MAC address; label them physically.

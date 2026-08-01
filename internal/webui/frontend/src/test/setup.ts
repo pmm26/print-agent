@@ -1,5 +1,6 @@
 import '@testing-library/jest-dom/vitest'
 import { afterAll, afterEach, beforeAll } from 'vitest'
+import { cleanup } from '@testing-library/react'
 import { server } from './server'
 
 Object.defineProperty(window, 'matchMedia', {
@@ -14,5 +15,5 @@ Object.defineProperty(Element.prototype, 'setPointerCapture', { value: () => und
 Object.defineProperty(Element.prototype, 'releasePointerCapture', { value: () => undefined })
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
-afterEach(() => server.resetHandlers())
+afterEach(() => { cleanup(); server.resetHandlers() })
 afterAll(() => server.close())

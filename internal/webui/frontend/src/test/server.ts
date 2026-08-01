@@ -10,6 +10,7 @@ export const handlers = [
   http.get('/api/v1/status', () => HttpResponse.json(status)),
   http.get('/api/v1/jobs', () => HttpResponse.json({ jobs: [], nextCursor: '' })),
   http.get('/api/v1/bluetooth/devices', () => HttpResponse.json({ supported: true, devices: [] })),
+  http.get('/api/v1/bluetooth/candidates', () => HttpResponse.json([])),
   http.get('/api/v1/admin/settings', () => HttpResponse.json({ allowedOrigin: 'https://pos.example.test' })),
   http.get('/api/v1/admin/tokens', () => HttpResponse.json([])),
   http.get('/api/v1/printers/:printerId/queue', () => HttpResponse.json({ printer: status.printers[0], processingRun: null, queuedRuns: [], retryPendingRuns: [], attentionRuns: [], recentTransmittedRuns: [] })),
