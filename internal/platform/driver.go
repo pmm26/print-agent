@@ -1,7 +1,7 @@
 // Package platform isolates everything OS-specific behind the Driver
 // interface. The core of the agent (jobs, workers, API, rendering, storage)
 // never mentions an operating system; adding platform support means filling
-// in one subfolder (darwin/, linux/, windows/) and nothing else.
+// in one platform subfolder and nothing else.
 package platform
 
 import (
@@ -15,13 +15,13 @@ import (
 )
 
 // ErrNotConnected is returned by VerifyConnected when the OS positively
-// reports the paired device as disconnected. On macOS, serial opens and
-// writes to /dev/cu.* succeed (buffered by the OS) even with the printer
-// off, so the write path alone cannot detect a dead link.
+// reports the paired device as disconnected. Some Bluetooth serial stacks
+// can accept buffered writes while the printer is off, so the write path
+// alone cannot detect a dead link.
 var ErrNotConnected = errors.New("device is paired but not connected")
 
 // Bluetooth management errors let the local API return useful, stable error
-// codes without exposing BlueZ's implementation-specific D-Bus messages.
+// codes without exposing OS-specific implementation details.
 var (
 	ErrInvalidBluetoothAddress      = errors.New("invalid Bluetooth address")
 	ErrBluetoothDeviceNotFound      = errors.New("Bluetooth device not found")
@@ -79,7 +79,7 @@ type BluetoothDevice struct {
 
 // BluetoothPairer is an optional capability implemented by platforms which
 // can perform discovery and pairing without handing off to a desktop UI.
-// Linux implements this through BlueZ; callers must feature-detect it.
+// Callers must feature-detect this capability.
 type BluetoothPairer interface {
 	ListBluetoothDevices(ctx context.Context) ([]BluetoothDevice, error)
 	StartBluetoothDiscovery(ctx context.Context, connectionType config.ConnectionPreference) error
@@ -91,7 +91,7 @@ type BluetoothPairer interface {
 
 // Driver is one platform's implementation of Bluetooth-printer plumbing.
 type Driver interface {
-	// Name identifies the driver ("darwin", "linux", …) for diagnostics.
+	// Name identifies the driver for diagnostics.
 	Name() string
 	// EnsureConnected resolves (and if needed re-establishes) the endpoint
 	// for the configured printer and returns it.
@@ -109,7 +109,7 @@ type Driver interface {
 	OpenSystemBluetoothSettings(ctx context.Context) error
 	// NewTransport returns the byte channel used to talk to this printer.
 	// Most platforms use the shared serial transport; a platform may
-	// substitute its own (e.g. Linux RFCOMM sockets).
+	// substitute its own.
 	NewTransport(cfg config.PrinterConfig) transport.Transport
 }
 

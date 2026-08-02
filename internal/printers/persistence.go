@@ -61,17 +61,20 @@ func (g *persistenceGate) update(err error) {
 	g.mu.Unlock()
 }
 
-func (g *persistenceGate) end() {
+func (g *persistenceGate) end() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.failures > 0 {
-		g.failures--
+	if g.failures == 0 {
+		return false
 	}
+	g.failures--
 	if g.failures == 0 {
 		g.reason = ""
 		g.since = nil
 		close(g.resume)
+		return true
 	}
+	return false
 }
 
 func (g *persistenceGate) status() persistenceStatus {

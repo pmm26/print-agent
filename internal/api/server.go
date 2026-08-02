@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,23 +25,33 @@ import (
 )
 
 type Server struct {
-	jobsService *jobs.Service
-	jobsRepo    *jobs.Repository
-	manager     *printers.Manager
-	configRepo  *config.Repository
-	driver      platform.Driver
-	diag        *diagnostics.Service
-	logs        *appLogging.Store
-	auth        *AuthService
-	bus         *events.Bus
-	limiter     *keyedRateLimiter
-	pairLimiter *rateLimiter
-	log         *slog.Logger
+	jobsService   *jobs.Service
+	jobsRepo      *jobs.Repository
+	manager       *printers.Manager
+	configRepo    *config.Repository
+	driver        platform.Driver
+	diag          *diagnostics.Service
+	logs          *appLogging.Store
+	auth          *AuthService
+	bus           events.Publisher
+	limiter       *keyedRateLimiter
+	pairLimiter   *rateLimiter
+	log           *slog.Logger
+	eventHandler  http.Handler
+	eventPath     string
+	runtimeStatus func(context.Context) map[string]any
+}
+
+func (s *Server) SetEventHandler(path string, handler http.Handler) {
+	s.eventPath, s.eventHandler = path, handler
+}
+func (s *Server) SetRuntimeStatus(provider func(context.Context) map[string]any) {
+	s.runtimeStatus = provider
 }
 
 func NewServer(jobsService *jobs.Service, jobsRepo *jobs.Repository, manager *printers.Manager,
 	configRepo *config.Repository, driver platform.Driver, diag *diagnostics.Service,
-	logs *appLogging.Store, auth *AuthService, bus *events.Bus, log *slog.Logger) *Server {
+	logs *appLogging.Store, auth *AuthService, bus events.Publisher, log *slog.Logger) *Server {
 	return &Server{
 		jobsService: jobsService,
 		jobsRepo:    jobsRepo,
@@ -62,65 +73,83 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// POS-facing endpoints: CORS + auth + rate/body limits.
-	pos := func(h http.HandlerFunc) http.Handler {
-		return chain(h, s.posCORS, s.rateLimit, s.limitBody, s.requireAuth)
+	pos := func(scope string, h http.HandlerFunc) http.Handler {
+		return chain(h, s.posCORS, s.rateLimit, s.limitBody, s.requireScope(scope))
 	}
-	mux.Handle("POST /api/v1/jobs", pos(s.handleCreateJob))
-	mux.Handle("OPTIONS /api/v1/jobs", pos(s.noContent))
-	mux.Handle("GET /api/v1/jobs", pos(s.handleListJobs))
-	mux.Handle("GET /api/v1/jobs/{jobUID}", pos(s.handleGetJob))
-	mux.Handle("OPTIONS /api/v1/jobs/{jobUID}", pos(s.noContent))
-	mux.Handle("GET /api/v1/print-runs/{runUID}", pos(s.handleGetPrintRun))
-	mux.Handle("OPTIONS /api/v1/print-runs/{runUID}", pos(s.noContent))
-	mux.Handle("POST /api/v1/jobs/{jobUID}/reprint", pos(s.handleReprint))
-	mux.Handle("OPTIONS /api/v1/jobs/{jobUID}/reprint", pos(s.noContent))
-	mux.Handle("GET /api/v1/status", pos(s.handleStatus))
-	mux.Handle("OPTIONS /api/v1/status", pos(s.noContent))
-	mux.Handle("POST /api/v1/pair", chain(http.HandlerFunc(s.handlePair), s.posCORS, s.pairRateLimit, s.limitBody))
-	mux.Handle("OPTIONS /api/v1/pair", chain(http.HandlerFunc(s.noContent), s.posCORS))
+	mux.Handle("POST /api/v2/jobs", pos("jobs:submit", s.handleCreateJob))
+	mux.Handle("OPTIONS /api/v2/jobs", pos("jobs:submit", s.noContent))
+	mux.Handle("GET /api/v2/jobs", pos("jobs:read", s.handleListJobs))
+	mux.Handle("GET /api/v2/jobs/{jobUID}", pos("jobs:read", s.handleGetJob))
+	mux.Handle("OPTIONS /api/v2/jobs/{jobUID}", pos("jobs:read", s.noContent))
+	mux.Handle("GET /api/v2/print-runs/{runUID}", pos("jobs:read", s.handleGetPrintRun))
+	mux.Handle("OPTIONS /api/v2/print-runs/{runUID}", pos("jobs:read", s.noContent))
+	mux.Handle("POST /api/v2/jobs/{jobUID}/reprint", pos("jobs:submit", s.handleReprint))
+	mux.Handle("OPTIONS /api/v2/jobs/{jobUID}/reprint", pos("jobs:submit", s.noContent))
+	mux.Handle("GET /api/v2/status", pos("status:read", s.handleStatus))
+	mux.Handle("OPTIONS /api/v2/status", pos("status:read", s.noContent))
+	mux.Handle("POST /api/v2/pair", chain(http.HandlerFunc(s.handlePair), s.posCORS, s.pairRateLimit, s.limitBody))
+	mux.Handle("OPTIONS /api/v2/pair", chain(http.HandlerFunc(s.noContent), s.posCORS))
 
 	// Health is unauthenticated but still uses the configured browser origin.
-	mux.Handle("GET /api/v1/health", chain(http.HandlerFunc(s.handleHealth), s.posCORS, s.rateLimit))
-	mux.Handle("OPTIONS /api/v1/health", chain(http.HandlerFunc(s.noContent), s.posCORS))
+	mux.Handle("GET /api/v2/health", chain(http.HandlerFunc(s.handleHealth), s.posCORS, s.rateLimit))
+	mux.Handle("OPTIONS /api/v2/health", chain(http.HandlerFunc(s.noContent), s.posCORS))
+	mux.Handle("GET /api/v2/health/live", http.HandlerFunc(s.handleLiveness))
+	mux.Handle("GET /api/v2/health/ready", http.HandlerFunc(s.handleReadiness))
 
 	// Management endpoints: local browser or local tools only.
 	admin := func(h http.HandlerFunc) http.Handler {
 		return chain(h, s.localOnly, s.limitBody)
 	}
-	mux.Handle("GET /api/v1/printers", admin(s.handleListPrinters))
-	mux.Handle("POST /api/v1/printers", admin(s.handleCreatePrinter))
-	mux.Handle("PUT /api/v1/printers/{printerID}", admin(s.handleUpdatePrinter))
-	mux.Handle("DELETE /api/v1/printers/{printerID}", admin(s.handleDeletePrinter))
-	mux.Handle("POST /api/v1/printers/reconnect-all", admin(s.handleReconnectAll))
-	mux.Handle("POST /api/v1/printers/{printerID}/reconnect", admin(s.handleReconnect))
-	mux.Handle("POST /api/v1/printers/{printerID}/test", admin(s.handleTestPrint))
-	mux.Handle("POST /api/v1/printers/{printerID}/enable", admin(s.handleEnable(true)))
-	mux.Handle("POST /api/v1/printers/{printerID}/disable", admin(s.handleEnable(false)))
-	mux.Handle("GET /api/v1/bluetooth/candidates", admin(s.handleCandidates))
-	mux.Handle("GET /api/v1/bluetooth/devices", admin(s.handleBluetoothDevices))
-	mux.Handle("POST /api/v1/bluetooth/discovery/start", admin(s.handleStartBluetoothDiscovery))
-	mux.Handle("POST /api/v1/bluetooth/discovery/stop", admin(s.handleStopBluetoothDiscovery))
-	mux.Handle("POST /api/v1/bluetooth/devices/{address}/pair", admin(s.handlePairBluetoothDevice))
-	mux.Handle("POST /api/v1/bluetooth/devices/{address}/disconnect", admin(s.handleDisconnectBluetoothDevice))
-	mux.Handle("DELETE /api/v1/bluetooth/devices/{address}", admin(s.handleForgetBluetoothDevice))
-	mux.Handle("POST /api/v1/system/open-bluetooth-settings", admin(s.handleOpenBluetooth))
-	mux.Handle("GET /api/v1/printers/{printerID}/queue", admin(s.handlePrinterQueue))
-	mux.Handle("POST /api/v1/print-runs/{runUID}/confirm-printed", admin(s.handleConfirmPrinted))
-	mux.Handle("POST /api/v1/print-runs/{runUID}/cancel", admin(s.handleCancelRun))
-	mux.Handle("POST /api/v1/jobs/{jobUID}/cancel", admin(s.handleCancelJob))
-	mux.Handle("GET /api/v1/logs", admin(s.handleLogs))
-	mux.Handle("GET /api/v1/system-logs", admin(s.handleSystemLogs))
-	mux.Handle("GET /api/v1/printer-logs", admin(s.handlePrinterLogs))
-	mux.Handle("GET /api/v1/diagnostics", admin(s.handleDiagnostics))
-	mux.Handle("GET /api/v1/diagnostics/export", admin(s.handleDiagnosticsExport))
-	mux.Handle("POST /api/v1/admin/pairing-code", admin(s.handlePairingCode))
-	mux.Handle("GET /api/v1/admin/tokens", admin(s.handleListTokens))
-	mux.Handle("DELETE /api/v1/admin/tokens/{tokenID}", admin(s.handleRevokeToken))
-	mux.Handle("GET /api/v1/admin/settings", admin(s.handleGetSettings))
-	mux.Handle("PUT /api/v1/admin/settings", admin(s.handlePutSettings))
+	mux.Handle("GET /api/v2/printers", admin(s.handleListPrinters))
+	mux.Handle("POST /api/v2/printers", admin(s.handleCreatePrinter))
+	mux.Handle("PUT /api/v2/printers/{printerID}", admin(s.handleUpdatePrinter))
+	mux.Handle("DELETE /api/v2/printers/{printerID}", admin(s.handleDeletePrinter))
+	mux.Handle("POST /api/v2/printers/reconnect-all", admin(s.handleReconnectAll))
+	mux.Handle("POST /api/v2/printers/{printerID}/reconnect", admin(s.handleReconnect))
+	mux.Handle("POST /api/v2/printers/{printerID}/test", admin(s.handleTestPrint))
+	mux.Handle("POST /api/v2/printers/{printerID}/enable", admin(s.handleEnable(true)))
+	mux.Handle("POST /api/v2/printers/{printerID}/disable", admin(s.handleEnable(false)))
+	mux.Handle("GET /api/v2/bluetooth/candidates", admin(s.handleCandidates))
+	mux.Handle("GET /api/v2/bluetooth/devices", admin(s.handleBluetoothDevices))
+	mux.Handle("POST /api/v2/bluetooth/discovery/start", admin(s.handleStartBluetoothDiscovery))
+	mux.Handle("POST /api/v2/bluetooth/discovery/stop", admin(s.handleStopBluetoothDiscovery))
+	mux.Handle("POST /api/v2/bluetooth/devices/{address}/pair", admin(s.handlePairBluetoothDevice))
+	mux.Handle("POST /api/v2/bluetooth/devices/{address}/disconnect", admin(s.handleDisconnectBluetoothDevice))
+	mux.Handle("DELETE /api/v2/bluetooth/devices/{address}", admin(s.handleForgetBluetoothDevice))
+	mux.Handle("POST /api/v2/system/open-bluetooth-settings", admin(s.handleOpenBluetooth))
+	mux.Handle("GET /api/v2/printers/{printerID}/queue", admin(s.handlePrinterQueue))
+	mux.Handle("POST /api/v2/print-runs/{runUID}/confirm-printed", admin(s.handleConfirmPrinted))
+	mux.Handle("POST /api/v2/print-runs/{runUID}/cancel", admin(s.handleCancelRun))
+	mux.Handle("POST /api/v2/jobs/{jobUID}/cancel", admin(s.handleCancelJob))
+	mux.Handle("GET /api/v2/logs", admin(s.handleLogs))
+	mux.Handle("GET /api/v2/system-logs", admin(s.handleSystemLogs))
+	mux.Handle("GET /api/v2/printer-logs", admin(s.handlePrinterLogs))
+	mux.Handle("GET /api/v2/diagnostics", admin(s.handleDiagnostics))
+	mux.Handle("GET /api/v2/diagnostics/export", admin(s.handleDiagnosticsExport))
+	mux.Handle("GET /api/v2/metrics", admin(s.handleMetrics))
+	mux.Handle("POST /api/v2/admin/pairing-code", admin(s.handlePairingCode))
+	mux.Handle("GET /api/v2/admin/tokens", admin(s.handleListTokens))
+	mux.Handle("DELETE /api/v2/admin/tokens/{tokenID}", admin(s.handleRevokeToken))
+	mux.Handle("GET /api/v2/admin/settings", admin(s.handleGetSettings))
+	mux.Handle("PUT /api/v2/admin/settings", admin(s.handlePutSettings))
+	mux.Handle("POST /api/v2/events/ticket", admin(s.handleEventTicket))
+	mux.Handle("POST /api/v2/admin/event-credentials", admin(s.handleCreateEventCredential))
+	mux.Handle("GET /api/v2/admin/websocket", admin(s.handleGetWebSocketSettings))
+	mux.Handle("PUT /api/v2/admin/websocket", admin(s.handlePutWebSocketSettings))
+	if s.eventHandler != nil {
+		mux.Handle("GET "+s.eventPath, s.eventHandler)
+	}
 
 	// Embedded dashboard.
-	mux.Handle("/admin/", http.StripPrefix("/admin", webui.Handler()))
+	dashboard := http.StripPrefix("/admin", webui.Handler())
+	mux.Handle("/admin/setup/pair", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.driver.Name() != "linux" {
+			http.Redirect(w, r, "/admin/setup/printers", http.StatusFound)
+			return
+		}
+		dashboard.ServeHTTP(w, r)
+	}))
+	mux.Handle("/admin/", dashboard)
 	mux.Handle("/admin", http.RedirectHandler("/admin/operations/jobs", http.StatusFound))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -136,7 +165,7 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		next.ServeHTTP(&loggingResponseWriter{ResponseWriter: w, log: s.log}, r)
-		if r.URL.Path != "/api/v1/status" && r.URL.Path != "/api/v1/health" { // too chatty
+		if r.URL.Path != "/api/v2/status" && r.URL.Path != "/api/v2/health" { // too chatty
 			s.log.Debug("http", "method", r.Method, "path", r.URL.Path, "origin", r.Header.Get("Origin"))
 		}
 	})
@@ -237,7 +266,7 @@ func (s *Server) writeBluetoothError(w http.ResponseWriter, address string, err 
 	case errors.Is(err, platform.ErrBluetoothProtocolUnsupported):
 		writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Code: "connection_type_unsupported", Error: err.Error()})
 	default:
-		writeJSON(w, http.StatusBadGateway, errorResponse{Code: "bluetooth_error", Error: "BlueZ could not pair the device; check the agent log for details"})
+		writeJSON(w, http.StatusBadGateway, errorResponse{Code: "bluetooth_error", Error: "Bluetooth pairing failed; check the agent log for details"})
 	}
 }
 

@@ -24,7 +24,7 @@ type worker struct {
 	repo         *jobs.Repository
 	renderer     *escpos.Renderer
 	driver       platform.Driver
-	bus          *events.Bus
+	bus          events.Publisher
 	newTransport func(config.PrinterConfig) transport.Transport
 	gate         *persistenceGate
 	transmission *transmissionGate
@@ -36,6 +36,7 @@ type worker struct {
 
 	mu        sync.Mutex
 	state     ConnectionState
+	activity  ActivityState
 	tr        transport.Transport
 	activeCfg config.PrinterConfig
 	lastError string
@@ -45,7 +46,7 @@ type worker struct {
 }
 
 func newWorker(cfg config.PrinterConfig, repo *jobs.Repository, renderer *escpos.Renderer,
-	driver platform.Driver, bus *events.Bus,
+	driver platform.Driver, bus events.Publisher,
 	factory func(config.PrinterConfig) transport.Transport) *worker {
 	return &worker{
 		cfg:          cfg,
@@ -58,6 +59,7 @@ func newWorker(cfg config.PrinterConfig, repo *jobs.Repository, renderer *escpos
 		reconnectNow: make(chan struct{}, 1),
 		done:         make(chan struct{}),
 		state:        StateDisconnected,
+		activity:     ActivityIdle,
 		transmission: newTransmissionGate(),
 	}
 }
@@ -70,6 +72,7 @@ func (w *worker) start(parent context.Context) {
 
 func (w *worker) stop() {
 	if w.cancel != nil {
+		w.setState(StateStopping)
 		w.cancel()
 		<-w.done
 	}
@@ -103,7 +106,7 @@ func (w *worker) run(ctx context.Context) {
 		}
 		w.drainQueue(ctx)
 		if w.snapshotState() != StateConnected {
-			continue // connection was lost while printing; reconnect
+			continue // connection was lost during queue activity; reconnect
 		}
 		select {
 		case <-ctx.Done():
@@ -139,10 +142,12 @@ func (w *worker) connectLoop(ctx context.Context) bool {
 	for ctx.Err() == nil {
 		if attempt == 0 {
 			w.setState(StateConnecting)
+			w.bus.Publish(events.Event{Type: events.PrinterConnecting, PrinterID: w.cfg.ID,
+				Metadata: map[string]any{"connectionAttempt": 1, "reconnect": false}})
 		} else {
-			w.setState(StateReconnecting)
-			w.bus.Publish(events.Event{Type: events.PrinterReconnecting, PrinterID: w.cfg.ID,
-				Message: fmt.Sprintf("connection attempt %d", attempt+1)})
+			w.setState(StateConnecting)
+			w.bus.Publish(events.Event{Type: events.PrinterConnecting, PrinterID: w.cfg.ID,
+				Metadata: map[string]any{"connectionAttempt": attempt + 1, "reconnect": true}})
 		}
 		err := w.connectOnce(ctx)
 		if err == nil {
@@ -153,7 +158,9 @@ func (w *worker) connectLoop(ctx context.Context) bool {
 			w.nextRetry = nil
 			endpoint := w.tr.Endpoint()
 			w.mu.Unlock()
-			w.bus.Publish(events.Event{Type: events.PrinterConnected, PrinterID: w.cfg.ID, Message: endpoint})
+			w.bus.Publish(events.Event{Type: events.PrinterConnected, PrinterID: w.cfg.ID,
+				Metadata: map[string]any{"endpoint": endpoint, "reconnect": attempt > 0,
+					"connectionAttempt": attempt + 1}})
 			w.materializeRetries()
 			return true
 		}
@@ -167,14 +174,15 @@ func (w *worker) connectLoop(ctx context.Context) bool {
 		w.lastError = err.Error()
 		w.attempt = attempt
 		w.nextRetry = &next
-		manualOnly := !w.cfg.AutoReconnect
+		manualOnly := !w.cfg.AutoReconnect || requiresOperatorAction(err)
 		if manualOnly {
-			w.state = StateError
+			w.state = StateOperatorAction
 			w.nextRetry = nil
 		}
 		w.mu.Unlock()
-		w.bus.Publish(events.Event{Type: events.PrinterError, PrinterID: w.cfg.ID,
-			Message: fmt.Sprintf("connection attempt %d failed: %v", attempt, err)})
+		w.bus.Publish(events.Event{Type: events.PrinterConnectionFailed, PrinterID: w.cfg.ID,
+			Error:    &events.Error{Code: "connection_failed", Message: err.Error(), Retryable: !manualOnly},
+			Metadata: map[string]any{"connectionAttempt": attempt}})
 
 		if manualOnly {
 			// Park until an operator presses Reconnect.
@@ -185,6 +193,9 @@ func (w *worker) connectLoop(ctx context.Context) bool {
 				continue
 			}
 		}
+		w.setState(StateReconnectWait)
+		w.bus.Publish(events.Event{Type: events.PrinterReconnectScheduled, PrinterID: w.cfg.ID,
+			Metadata: map[string]any{"connectionAttempt": attempt + 1, "delayMs": delay.Milliseconds(), "nextRetryAt": next.UTC()}})
 		select {
 		case <-ctx.Done():
 			return false
@@ -193,6 +204,12 @@ func (w *worker) connectLoop(ctx context.Context) bool {
 		}
 	}
 	return false
+}
+
+func requiresOperatorAction(err error) bool {
+	return errors.Is(err, platform.ErrBluetoothProtocolUnsupported) ||
+		errors.Is(err, platform.ErrBluetoothNotAuthorized) ||
+		errors.Is(err, platform.ErrInvalidBluetoothAddress)
 }
 
 func (w *worker) connectOnce(ctx context.Context) error {
@@ -208,11 +225,13 @@ func (w *worker) connectOnce(ctx context.Context) error {
 	}
 	tr := w.newTransport(cfg)
 	if err := tr.Connect(ctx); err != nil {
+		_ = tr.Close()
 		return err
 	}
 	// Opening the endpoint succeeds on macOS even when the printer is off.
 	// Confirm the OS-level Bluetooth link; the open may itself trigger the
 	// link to come up, so allow one short grace retry.
+	w.setState(StateVerifying)
 	state, verifyErr := w.linkState(ctx, cfg)
 	if verifyErr != nil || state != platform.LinkConnected {
 		select {
@@ -240,6 +259,9 @@ func (w *worker) connectOnce(ctx context.Context) error {
 // drainQueue processes queued Print Runs until the queue is empty, the
 // connection drops, or the context ends.
 func (w *worker) drainQueue(ctx context.Context) {
+	if w.repo == nil {
+		return
+	}
 	for ctx.Err() == nil && w.snapshotState() == StateConnected {
 		if w.gate != nil {
 			if err := w.gate.wait(ctx); err != nil {
@@ -249,7 +271,7 @@ func (w *worker) drainQueue(ctx context.Context) {
 		if err := w.transmission.acquire(ctx); err != nil {
 			return
 		}
-		run, err := w.claimNext()
+		run, err := w.claimNext(ctx)
 		if errors.Is(err, jobs.ErrNotFound) {
 			w.transmission.release()
 			return
@@ -260,14 +282,14 @@ func (w *worker) drainQueue(ctx context.Context) {
 				Message: "queue claim failed: " + err.Error()})
 			return
 		}
-		w.bus.Publish(events.Event{Type: events.PrintRunProcessing, PrinterID: w.cfg.ID,
-			RunUID: run.UID})
+		w.setActivity(ActivityClaimed)
 		w.process(ctx, run)
+		w.setActivity(ActivityIdle)
 		w.transmission.release()
 	}
 }
 
-func (w *worker) claimNext() (jobs.PrintRun, error) {
+func (w *worker) claimNext(ctx context.Context) (jobs.PrintRun, error) {
 	run, err := w.repo.ClaimNextQueued(w.cfg.ID)
 	if err == nil || errors.Is(err, jobs.ErrNotFound) {
 		return run, err
@@ -277,17 +299,22 @@ func (w *worker) claimNext() (jobs.PrintRun, error) {
 	}
 	w.gate.begin(err)
 	if w.bus != nil {
-		w.bus.Publish(events.Event{Type: events.PrinterError, PrinterID: w.cfg.ID, Message: "database unavailable; all queue claims paused: " + err.Error()})
+		w.bus.Publish(events.Event{Type: events.PersistenceDegraded,
+			Error: &events.Error{Code: "sqlite_unavailable", Message: "delivery-state persistence is unavailable", Retryable: true}})
 	}
 	delay := 250 * time.Millisecond
 	for {
 		w.mu.Lock()
 		w.lastError = "database persistence paused: " + err.Error()
 		w.mu.Unlock()
-		time.Sleep(delay)
+		if !waitContext(ctx, delay) {
+			return jobs.PrintRun{}, ctx.Err()
+		}
 		run, err = w.repo.ClaimNextQueued(w.cfg.ID)
 		if err == nil || errors.Is(err, jobs.ErrNotFound) {
-			w.gate.end()
+			if w.gate.end() {
+				w.bus.Publish(events.Event{Type: events.PersistenceRecovered})
+			}
 			w.mu.Lock()
 			w.lastError = ""
 			w.mu.Unlock()
@@ -311,15 +338,7 @@ func (w *worker) materializeRetries() {
 		func(job jobs.Job, target jobs.JobPrinter, previous jobs.PrintRun, runNumber int) (string, error) {
 			return jobs.ExpectedContentHash(w.renderer, job, target, previous.ContentMode, runNumber)
 		})
-	for _, run := range runs {
-		if run.Status == jobs.RunFailed {
-			w.bus.Publish(events.Event{Type: events.PrintRunFailed, PrinterID: run.PrinterID,
-				RunUID: run.UID, Message: run.ErrorMessage})
-		} else {
-			w.bus.Publish(events.Event{Type: events.PrintRunQueued, PrinterID: run.PrinterID,
-				RunUID: run.UID, Message: "automatic retry after reconnection"})
-		}
-	}
+	_ = runs // repository commits retry events atomically with retry creation
 	if err != nil {
 		w.bus.Publish(events.Event{Type: events.PrinterError, PrinterID: w.cfg.ID,
 			Message: "retry creation failed: " + err.Error()})
@@ -327,18 +346,14 @@ func (w *worker) materializeRetries() {
 }
 
 func (w *worker) process(ctx context.Context, run jobs.PrintRun) {
-	w.setState(StatePrinting)
-
 	job, err := w.repo.GetJob(run.JobUID)
 	if err != nil {
-		w.persist(func() error { return w.repo.MarkFailed(run.UID, 0, "job_unavailable", err.Error(), false) })
-		w.setState(StateConnected)
+		w.persist(ctx, func() error { return w.repo.MarkFailed(run.UID, 0, "job_unavailable", err.Error(), false) })
 		return
 	}
 	target, err := w.repo.GetTarget(run.JobUID, run.PrinterID)
 	if err != nil {
-		w.persist(func() error { return w.repo.MarkFailed(run.UID, 0, "target_unavailable", err.Error(), false) })
-		w.setState(StateConnected)
+		w.persist(ctx, func() error { return w.repo.MarkFailed(run.UID, 0, "target_unavailable", err.Error(), false) })
 		return
 	}
 	renderCfg := w.cfg
@@ -348,10 +363,7 @@ func (w *worker) process(ctx context.Context, run jobs.PrintRun) {
 		Reprint: run.ContentMode == jobs.ContentReprint, RunNumber: run.RunNumber, AcceptedAt: job.CreatedAt,
 	})
 	if err != nil {
-		w.persist(func() error { return w.repo.MarkFailed(run.UID, 0, "render_failed", err.Error(), false) })
-		w.bus.Publish(events.Event{Type: events.PrintRunFailed, PrinterID: w.cfg.ID,
-			RunUID: run.UID, Message: err.Error()})
-		w.setState(StateConnected)
+		w.persist(ctx, func() error { return w.repo.MarkFailed(run.UID, 0, "render_failed", err.Error(), false) })
 		return
 	}
 	expected, err := jobs.ExpectedContentHash(w.renderer, job, target, run.ContentMode, run.RunNumber)
@@ -360,11 +372,19 @@ func (w *worker) process(ctx context.Context, run jobs.PrintRun) {
 		if err != nil {
 			message = err.Error()
 		}
-		w.persist(func() error { return w.repo.MarkFailed(run.UID, 0, "content_hash_mismatch", message, false) })
-		w.bus.Publish(events.Event{Type: events.PrintRunFailed, PrinterID: w.cfg.ID, RunUID: run.UID, Message: message})
-		w.setState(StateConnected)
+		w.persist(ctx, func() error { return w.repo.MarkFailed(run.UID, 0, "content_hash_mismatch", message, false) })
 		return
 	}
+	if ctx.Err() != nil {
+		w.persist(ctx, func() error {
+			return w.repo.MarkFailed(run.UID, 0, "shutdown_before_transmission", "agent stopped before transmission began", true)
+		})
+		return
+	}
+	if !w.persist(ctx, func() error { return w.repo.MarkTransmitting(run.UID) }) {
+		return
+	}
+	w.setActivity(ActivityTransmitting)
 
 	w.mu.Lock()
 	tr := w.tr
@@ -372,8 +392,8 @@ func (w *worker) process(ctx context.Context, run jobs.PrintRun) {
 	w.mu.Unlock()
 	err = tr.Write(ctx, doc)
 	if err == nil {
-		// The OS accepted every byte, but on macOS that only means they were
-		// buffered. Claim `transmitted` only while the Bluetooth link is
+		// The OS accepted every byte, but a Bluetooth serial stack may only have
+		// buffered them. Claim `transmitted` only while the Bluetooth link is
 		// confirmed up; otherwise the ticket's fate is unknowable.
 		state, verr := w.linkState(ctx, activeCfg)
 		if verr != nil || state != platform.LinkConnected {
@@ -382,27 +402,23 @@ func (w *worker) process(ctx context.Context, run jobs.PrintRun) {
 				reason += ": " + verr.Error()
 			}
 			w.closeTransport(StateDisconnected, reason)
-			w.persist(func() error { return w.repo.MarkUncertain(run.UID, len(doc), "link_unknown_after_write", reason) })
-			w.bus.Publish(events.Event{Type: events.PrintRunUncertain, PrinterID: w.cfg.ID,
-				RunUID: run.UID, Message: "printer disconnected during transmission"})
+			w.persist(ctx, func() error { return w.repo.MarkUncertain(run.UID, len(doc), "link_unknown_after_write", reason) })
 			w.bus.Publish(events.Event{Type: events.PrinterDisconnected, PrinterID: w.cfg.ID,
 				Message: "OS reports the printer disconnected"})
 			return
 		}
 		now := time.Now().UTC()
-		w.persist(func() error { return w.repo.MarkTransmitted(run.UID, len(doc)) })
+		w.persist(ctx, func() error { return w.repo.MarkTransmitted(run.UID, len(doc)) })
 		w.mu.Lock()
 		w.lastTx = &now
 		w.state = StateConnected
 		w.mu.Unlock()
-		w.bus.Publish(events.Event{Type: events.PrintRunTransmitted, PrinterID: w.cfg.ID,
-			RunUID: run.UID, Message: fmt.Sprintf("%d bytes", len(doc))})
 		return
 	}
 
 	// Any write error means the connection can no longer be trusted.
 	bytesWritten := 0
-	ambiguous := false
+	ambiguous := true
 	if werr, ok := errors.AsType[*transport.WriteError](err); ok {
 		bytesWritten = werr.BytesWritten
 		ambiguous = werr.Ambiguous()
@@ -413,22 +429,18 @@ func (w *worker) process(ctx context.Context, run jobs.PrintRun) {
 	// A timed-out write may have partially reached the printer even when the
 	// counted bytes are zero, so timeouts are always uncertain.
 	if ambiguous {
-		w.persist(func() error { return w.repo.MarkUncertain(run.UID, bytesWritten, "ambiguous_write", err.Error()) })
-		w.bus.Publish(events.Event{Type: events.PrintRunUncertain, PrinterID: w.cfg.ID,
-			RunUID: run.UID, Message: err.Error()})
+		w.persist(ctx, func() error { return w.repo.MarkUncertain(run.UID, bytesWritten, "ambiguous_write", err.Error()) })
 	} else {
 		// Keep the failed row immutable. A new retry Run is created only after
 		// this printer reconnects.
-		w.persist(func() error { return w.repo.MarkFailed(run.UID, bytesWritten, "not_sent", err.Error(), true) })
-		w.bus.Publish(events.Event{Type: events.PrintRunFailed, PrinterID: w.cfg.ID,
-			RunUID: run.UID, Message: "safe retry pending reconnection: " + err.Error()})
+		w.persist(ctx, func() error { return w.repo.MarkFailed(run.UID, bytesWritten, "not_sent", err.Error(), true) })
 	}
 }
 
-func (w *worker) persist(fn func() error) {
+func (w *worker) persist(ctx context.Context, fn func() error) bool {
 	err := fn()
 	if err == nil {
-		return
+		return true
 	}
 	if w.gate == nil {
 		// Direct unit workers do not have a manager gate. Keep the production
@@ -437,24 +449,29 @@ func (w *worker) persist(fn func() error) {
 	}
 	w.gate.begin(err)
 	if w.bus != nil {
-		w.bus.Publish(events.Event{Type: events.PrinterError, PrinterID: w.cfg.ID, Message: "database unavailable; all queue claims paused: " + err.Error()})
+		w.bus.Publish(events.Event{Type: events.PersistenceDegraded,
+			Error: &events.Error{Code: "sqlite_unavailable", Message: "delivery-state persistence is unavailable", Retryable: true}})
 	}
 	delay := 250 * time.Millisecond
 	for {
 		w.mu.Lock()
 		w.lastError = "database persistence paused: " + err.Error()
 		w.mu.Unlock()
-		time.Sleep(delay)
+		if !waitContext(ctx, delay) {
+			return false
+		}
 		nextErr := fn()
 		if nextErr == nil {
 			nextErr = w.repo.Ping()
 		}
 		if nextErr == nil {
-			w.gate.end()
+			if w.gate.end() {
+				w.bus.Publish(events.Event{Type: events.PersistenceRecovered})
+			}
 			w.mu.Lock()
 			w.lastError = ""
 			w.mu.Unlock()
-			return
+			return true
 		}
 		err = nextErr
 		w.gate.update(err)
@@ -464,6 +481,17 @@ func (w *worker) persist(fn func() error) {
 				delay = 30 * time.Second
 			}
 		}
+	}
+}
+
+func waitContext(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -486,16 +514,23 @@ func (w *worker) linkState(ctx context.Context, cfg config.PrinterConfig) (platf
 
 func (w *worker) closeTransport(state ConnectionState, reason string) {
 	w.mu.Lock()
-	if w.tr != nil {
-		w.tr.Close()
-		w.tr = nil
-		w.activeCfg = config.PrinterConfig{}
-	}
+	tr := w.tr
+	activeCfg := w.activeCfg
+	w.tr = nil
+	w.activeCfg = config.PrinterConfig{}
 	w.state = state
 	if reason != "" {
 		w.lastError = reason
 	}
 	w.mu.Unlock()
+	if tr != nil {
+		_ = tr.Close()
+	}
+	if activeCfg.Transport == config.TransportBluetoothSerial && w.driver != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = w.driver.Disconnect(ctx, activeCfg)
+		cancel()
+	}
 }
 
 func (w *worker) connectionConfig() config.PrinterConfig {
@@ -529,10 +564,17 @@ func (w *worker) status() Status {
 	return Status{
 		Printer:          w.cfg,
 		State:            w.state,
+		Activity:         w.activity,
 		Endpoint:         endpoint,
 		LastError:        w.lastError,
 		LastTransmission: w.lastTx,
 		ReconnectAttempt: w.attempt,
 		NextRetryAt:      w.nextRetry,
 	}
+}
+
+func (w *worker) setActivity(activity ActivityState) {
+	w.mu.Lock()
+	w.activity = activity
+	w.mu.Unlock()
 }

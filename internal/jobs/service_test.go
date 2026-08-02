@@ -44,7 +44,7 @@ func newTestService(t *testing.T) (*Service, *Repository) {
 		}
 		dir[id] = cfg
 	}
-	svc := NewService(repo, events.NewBus(), dir, escpos.NewRenderer(), escpos.KnownTemplate)
+	svc := NewService(repo, events.NewDiscardPublisher(), dir, escpos.NewRenderer(), escpos.KnownTemplate)
 	svc.SetPayloadValidator(escpos.ValidateTemplateData)
 	return svc, repo
 }
@@ -155,11 +155,14 @@ func TestQueueClaimAndStateTransitions(t *testing.T) {
 		t.Fatal(err)
 	}
 	run, err := repo.ClaimNextQueued("kitchen")
-	if err != nil || run.Status != RunProcessing || run.RunNumber != 1 {
+	if err != nil || run.Status != RunClaimed || run.RunNumber != 1 {
 		t.Fatalf("claim = %+v, %v", run, err)
 	}
 	if _, err := repo.ClaimNextQueued("kitchen"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second claim = %v", err)
+	}
+	if err := repo.MarkTransmitting(run.UID); err != nil {
+		t.Fatal(err)
 	}
 	if err := repo.MarkTransmitted(run.UID, 120); err != nil {
 		t.Fatal(err)
@@ -292,6 +295,9 @@ func TestManualReprintIdempotencyAndFulfillment(t *testing.T) {
 	svc, repo := newTestService(t)
 	accepted, _ := svc.Accept(sampleRequest())
 	first, _ := repo.ClaimNextQueued("kitchen")
+	if err := repo.MarkTransmitting(first.UID); err != nil {
+		t.Fatal(err)
+	}
 	if err := repo.MarkUncertain(first.UID, 20, "ambiguous_write", "link dropped"); err != nil {
 		t.Fatal(err)
 	}
@@ -309,6 +315,9 @@ func TestManualReprintIdempotencyAndFulfillment(t *testing.T) {
 		t.Fatalf("duplicate reprint = %+v, %v", duplicate, err)
 	}
 	claimed, _ := repo.ClaimNextQueued("kitchen")
+	if err := repo.MarkTransmitting(claimed.UID); err != nil {
+		t.Fatal(err)
+	}
 	if err := repo.MarkTransmitted(claimed.UID, 100); err != nil {
 		t.Fatal(err)
 	}
@@ -346,6 +355,7 @@ func TestConfirmUncertainFulfillsTarget(t *testing.T) {
 	svc, repo := newTestService(t)
 	accepted, _ := svc.Accept(sampleRequest())
 	run, _ := repo.ClaimNextQueued("kitchen")
+	repo.MarkTransmitting(run.UID)
 	repo.MarkUncertain(run.UID, 10, "ambiguous_write", "unknown")
 	if err := svc.ConfirmPrinted(run.UID); err != nil {
 		t.Fatal(err)
@@ -369,12 +379,13 @@ func TestTargetCancellationAndReactivation(t *testing.T) {
 	svc, repo := newTestService(t)
 	accepted, _ := svc.Accept(sampleRequest())
 	run, _ := repo.ClaimNextQueued("kitchen")
+	repo.MarkTransmitting(run.UID)
 	repo.MarkTransmitted(run.UID, 10)
 	if err := svc.CancelJobTargets(accepted.UID, []string{"bar"}, "station closed"); err != nil {
 		t.Fatal(err)
 	}
 	detail, _ := repo.GetDetail(accepted.UID)
-	if detail.State != "partially_completed" || !detail.PartiallyFulfilled {
+	if detail.State != "partially_transmitted" || !detail.PartiallyFulfilled {
 		t.Fatalf("cancelled target aggregate = %+v", detail)
 	}
 	reprint, err := svc.Reprint(accepted.UID, ReprintRequest{RequestID: "reactivate", PrinterIDs: []string{"bar"}}, "local")
@@ -385,20 +396,65 @@ func TestTargetCancellationAndReactivation(t *testing.T) {
 	if claimed.UID != reprint.PrintRuns[0].UID {
 		t.Fatalf("claimed = %+v", claimed)
 	}
+	repo.MarkTransmitting(claimed.UID)
 	repo.MarkTransmitted(claimed.UID, 10)
 	detail, _ = repo.GetDetail(accepted.UID)
-	if detail.State != "completed" || detail.FulfilledPrinterCount != 2 {
+	if detail.State != "transmitted" || detail.FulfilledPrinterCount != 2 {
 		t.Fatalf("reactivated target aggregate = %+v", detail)
 	}
 }
 
-func TestRecoverAbandonedIsUncertain(t *testing.T) {
+func TestRecoverAbandonedDistinguishesClaimFromTransmission(t *testing.T) {
 	svc, repo := newTestService(t)
 	svc.Accept(sampleRequest())
 	run, _ := repo.ClaimNextQueued("kitchen")
 	recovered, err := repo.RecoverAbandoned()
+	if err != nil || len(recovered) != 1 || recovered[0].UID != run.UID ||
+		recovered[0].Status != RunFailed || recovered[0].RetryDisposition != RetryPendingReconnect {
+		t.Fatalf("recovered = %+v, %v", recovered, err)
+	}
+}
+
+func TestRecoverAbandonedTransmissionIsUncertain(t *testing.T) {
+	svc, repo := newTestService(t)
+	svc.Accept(sampleRequest())
+	run, _ := repo.ClaimNextQueued("kitchen")
+	if err := repo.MarkTransmitting(run.UID); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := repo.RecoverAbandoned()
 	if err != nil || len(recovered) != 1 || recovered[0].UID != run.UID || recovered[0].Status != RunUncertain {
 		t.Fatalf("recovered = %+v, %v", recovered, err)
+	}
+}
+
+func TestOutcomeAndDurableEventAreAtomic(t *testing.T) {
+	svc, repo := newTestService(t)
+	accepted, err := svc.Accept(sampleRequest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := repo.ClaimNextQueued("kitchen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkTransmitting(run.UID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.db.Exec(`CREATE TRIGGER reject_transmitted_event BEFORE INSERT ON durable_events
+		WHEN NEW.event_type = 'print_run.transmitted' BEGIN SELECT RAISE(ABORT, 'injected event failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.MarkTransmitted(run.UID, 100); err == nil {
+		t.Fatal("transmitted state committed without its event")
+	}
+	stored, err := repo.GetRun(run.UID)
+	if err != nil || stored.Status != RunTransmitting {
+		t.Fatalf("stored run = %+v, %v", stored, err)
+	}
+	detail, err := repo.GetDetail(accepted.UID)
+	if err != nil || detail.State != "transmitting" {
+		t.Fatalf("detail = %+v, %v", detail, err)
 	}
 }
 
@@ -407,6 +463,7 @@ func TestPurgeExpiresOnlySettledJobs(t *testing.T) {
 	completed, _ := svc.Accept(sampleRequest())
 	for _, printer := range []string{"kitchen", "bar"} {
 		run, _ := repo.ClaimNextQueued(printer)
+		repo.MarkTransmitting(run.UID)
 		repo.MarkTransmitted(run.UID, 10)
 	}
 	active := sampleRequest()

@@ -4,17 +4,18 @@ package diagnostics
 
 import (
 	"archive/zip"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"io"
 	"runtime"
 	"strings"
 	"time"
+
+	"print-agent/internal/events"
 )
 
-const EventRetention = 48 * time.Hour
-
-const sqliteEventTimeLayout = "2006-01-02T15:04:05.000Z"
+const EventRetention = 7 * 24 * time.Hour
 
 // Version is stamped at build time via -ldflags "-X ...".
 var Version = "dev"
@@ -43,28 +44,22 @@ type EventFilter struct {
 
 type Service struct {
 	db        *sql.DB
+	events    *events.Store
 	dbPath    string
 	startedAt time.Time
 }
 
 func NewService(db *sql.DB, dbPath string) *Service {
-	return &Service{db: db, dbPath: dbPath, startedAt: time.Now()}
+	store, _ := events.NewStore(db)
+	return &Service{db: db, events: store, dbPath: dbPath, startedAt: time.Now()}
 }
 
-// PersistEvent stores one bus event; wired as an event-bus subscriber.
+// PersistEvent records a sanitized operational event. Domain transitions use
+// events.Store.AppendTx directly so their event and state change are atomic.
 func (s *Service) PersistEvent(eventType, printerID, runUID, message string, at time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO print_events (run_uid, printer_id, event_type, message, created_at)
-		VALUES (?, ?, ?, ?, ?)`,
-		nullable(runUID), nullable(printerID), eventType, nullable(message),
-		at.UTC().Format(sqliteEventTimeLayout))
+	_, err := s.events.Append(context.Background(), events.Event{Type: eventType, PrinterID: printerID,
+		RunUID: runUID, Message: message, OccurredAt: at, Durability: events.DurabilityOperational})
 	return err
-}
-
-func nullable(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
 }
 
 // RecentEvents returns the newest events, newest first.
@@ -72,10 +67,10 @@ func (s *Service) RecentEvents(limit int) ([]EventRow, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`SELECT id, COALESCE(run_uid, ''), COALESCE(printer_id, ''),
-		event_type, COALESCE(message, ''), created_at
-		FROM print_events WHERE created_at >= ? ORDER BY created_at DESC, id DESC LIMIT ?`,
-		time.Now().UTC().Add(-EventRetention).Format(sqliteEventTimeLayout), limit)
+	rows, err := s.db.Query(`SELECT sequence, COALESCE(run_uid, ''), COALESCE(printer_id, ''),
+		event_type, COALESCE(safe_message, ''), occurred_at
+		FROM durable_events WHERE occurred_at >= ? ORDER BY sequence DESC LIMIT ?`,
+		time.Now().UTC().Add(-EventRetention).Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -93,14 +88,11 @@ func (s *Service) PrinterEvents(filter EventFilter) ([]EventRow, error) {
 	if filter.From != nil && filter.From.After(from) {
 		from = filter.From.UTC()
 	}
-	where := []string{`created_at >= ?`, `event_type IN (
-		'printer.connected','printer.disconnected','printer.reconnecting','printer.error','config.changed',
-		'print_run.queued','print_run.processing','print_run.transmitted','print_run.failed',
-		'print_run.uncertain','print_run.cancelled','print_run.resolved')`}
-	args := []any{from.Format(sqliteEventTimeLayout)}
+	where := []string{`occurred_at >= ?`, `category IN ('printer','print_run','config')`}
+	args := []any{from.Format(time.RFC3339Nano)}
 	if filter.To != nil {
-		where = append(where, "created_at <= ?")
-		args = append(args, filter.To.UTC().Format(sqliteEventTimeLayout))
+		where = append(where, "occurred_at <= ?")
+		args = append(args, filter.To.UTC().Format(time.RFC3339Nano))
 	}
 	if filter.PrinterID != "" {
 		where = append(where, "printer_id = ?")
@@ -115,21 +107,21 @@ func (s *Service) PrinterEvents(filter EventFilter) ([]EventRow, error) {
 		args = append(args, filter.RunUID)
 	}
 	if filter.Query != "" {
-		where = append(where, `(LOWER(event_type) LIKE ? ESCAPE '\' OR LOWER(COALESCE(message, '')) LIKE ? ESCAPE '\'
+		where = append(where, `(LOWER(event_type) LIKE ? ESCAPE '\' OR LOWER(COALESCE(safe_message, '')) LIKE ? ESCAPE '\'
 			OR LOWER(COALESCE(printer_id, '')) LIKE ? ESCAPE '\' OR LOWER(COALESCE(run_uid, '')) LIKE ? ESCAPE '\')`)
 		term := "%" + escapeLike(strings.ToLower(filter.Query)) + "%"
 		args = append(args, term, term, term, term)
 	}
 	if filter.Before != nil {
-		where = append(where, "(created_at < ? OR (created_at = ? AND id < ?))")
-		stamp := filter.Before.UTC().Format(sqliteEventTimeLayout)
+		where = append(where, "(occurred_at < ? OR (occurred_at = ? AND sequence < ?))")
+		stamp := filter.Before.UTC().Format(time.RFC3339Nano)
 		args = append(args, stamp, stamp, filter.BeforeID)
 	}
 	args = append(args, filter.Limit)
-	rows, err := s.db.Query(`SELECT id, COALESCE(run_uid, ''), COALESCE(printer_id, ''),
-		event_type, COALESCE(message, ''), created_at
-		FROM print_events WHERE `+strings.Join(where, " AND ")+`
-		ORDER BY created_at DESC, id DESC LIMIT ?`, args...)
+	rows, err := s.db.Query(`SELECT sequence, COALESCE(run_uid, ''), COALESCE(printer_id, ''),
+		event_type, COALESCE(safe_message, ''), occurred_at
+		FROM durable_events WHERE `+strings.Join(where, " AND ")+`
+		ORDER BY occurred_at DESC, sequence DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}

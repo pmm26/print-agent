@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"strings"
 	"time"
@@ -15,7 +16,7 @@ type TransportKind string
 
 const (
 	// TransportBluetoothSerial sends bytes over the platform's Bluetooth
-	// printer channel: SPP serial on macOS/Windows and SPP or BLE GATT on Linux.
+	// printer channel exposed by the active platform driver.
 	TransportBluetoothSerial TransportKind = "bluetooth-serial"
 	// TransportMock is an in-process fake printer used for development
 	// and integration tests. It records bytes instead of printing.
@@ -39,23 +40,24 @@ const (
 
 // PrinterConfig is the persisted configuration for one logical printer.
 type PrinterConfig struct {
-	ID                   string               `json:"id"`
-	DisplayName          string               `json:"displayName"`
-	Enabled              bool                 `json:"enabled"`
-	Transport            TransportKind        `json:"transport"`
-	DeviceAddress        string               `json:"deviceAddress,omitempty"`
-	Endpoint             string               `json:"endpoint"`
-	ConnectionPreference ConnectionPreference `json:"connectionPreference"`
-	BaudRate             int                  `json:"baudRate"`
-	DataBits             int                  `json:"dataBits"`
-	StopBits             int                  `json:"stopBits"`
-	Parity               string               `json:"parity"`
-	CharactersPerLine    int                  `json:"charactersPerLine"`
-	Encoding             string               `json:"encoding"`
-	AutoReconnect        bool                 `json:"autoReconnect"`
-	RetiredAt            *time.Time           `json:"retiredAt,omitempty"`
-	CreatedAt            time.Time            `json:"createdAt"`
-	UpdatedAt            time.Time            `json:"updatedAt"`
+	ID                      string               `json:"id"`
+	DisplayName             string               `json:"displayName"`
+	Enabled                 bool                 `json:"enabled"`
+	Transport               TransportKind        `json:"transport"`
+	DeviceAddress           string               `json:"deviceAddress,omitempty"`
+	Endpoint                string               `json:"endpoint"`
+	ConnectionPreference    ConnectionPreference `json:"connectionPreference"`
+	BaudRate                int                  `json:"baudRate"`
+	DataBits                int                  `json:"dataBits"`
+	StopBits                int                  `json:"stopBits"`
+	Parity                  string               `json:"parity"`
+	CharactersPerLine       int                  `json:"charactersPerLine"`
+	Encoding                string               `json:"encoding"`
+	AutoReconnect           bool                 `json:"autoReconnect"`
+	ConfigurationGeneration int                  `json:"configurationGeneration"`
+	RetiredAt               *time.Time           `json:"retiredAt,omitempty"`
+	CreatedAt               time.Time            `json:"createdAt"`
+	UpdatedAt               time.Time            `json:"updatedAt"`
 }
 
 var printerIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
@@ -116,10 +118,17 @@ func (p *PrinterConfig) Validate() error {
 	if len(p.Endpoint) > 512 || len(p.DeviceAddress) > 64 {
 		return errors.New("printer endpoint or device address is too long")
 	}
+	if p.DeviceAddress != "" {
+		address := strings.ReplaceAll(strings.TrimSpace(p.DeviceAddress), "-", ":")
+		hardwareAddress, err := net.ParseMAC(address)
+		if err != nil || len(hardwareAddress) != 6 {
+			return errors.New("deviceAddress must be a six-byte Bluetooth address")
+		}
+	}
 	lowerEndpoint := strings.ToLower(p.Endpoint)
 	if strings.HasPrefix(lowerEndpoint, "rfcomm://") || strings.HasPrefix(lowerEndpoint, "ble://") {
 		endpointAddress := strings.TrimPrefix(strings.TrimPrefix(lowerEndpoint, "rfcomm://"), "ble://")
-		normalizedDevice := strings.ToLower(strings.ReplaceAll(p.DeviceAddress, "-", ":"))
+		normalizedDevice := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(p.DeviceAddress), "-", ":"))
 		if normalizedDevice != "" && endpointAddress != normalizedDevice {
 			return errors.New("deviceAddress must match the Bluetooth address in endpoint")
 		}

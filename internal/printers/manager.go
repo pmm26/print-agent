@@ -36,7 +36,7 @@ type Manager struct {
 	jobsRepo   *jobs.Repository
 	renderer   *escpos.Renderer
 	driver     platform.Driver
-	bus        *events.Bus
+	bus        events.Publisher
 	factory    TransportFactory
 
 	mu           sync.Mutex
@@ -49,7 +49,7 @@ type Manager struct {
 }
 
 func NewManager(configRepo *config.Repository, jobsRepo *jobs.Repository,
-	driver platform.Driver, bus *events.Bus, factory TransportFactory) *Manager {
+	driver platform.Driver, bus events.Publisher, factory TransportFactory) *Manager {
 	if factory == nil {
 		factory = driverTransportFactory(driver)
 	}
@@ -179,12 +179,16 @@ func (m *Manager) ApplyPrinter(cfg config.PrinterConfig) error {
 }
 
 func (m *Manager) applyPrinterLocked(cfg config.PrinterConfig) error {
+	previous, previousErr := m.configRepo.GetPrinter(cfg.ID)
+	if previousErr != nil && !errors.Is(previousErr, config.ErrNotFound) {
+		return previousErr
+	}
 	processing, err := m.jobsRepo.HasProcessingRun(cfg.ID)
 	if err != nil {
 		return err
 	}
 	if processing {
-		return jobs.NewConflictError("printer configuration cannot change while a Print Run is processing")
+		return jobs.NewConflictError("printer configuration cannot change while a Print Run is claimed or transmitting")
 	}
 	if err := m.configRepo.SavePrinter(cfg); err != nil {
 		return err
@@ -193,8 +197,20 @@ func (m *Manager) applyPrinterLocked(cfg config.PrinterConfig) error {
 	if cfg.Enabled {
 		m.startWorker(cfg)
 	}
-	m.bus.Publish(events.Event{Type: events.ConfigChanged, PrinterID: cfg.ID,
-		Message: "printer configuration saved"})
+	saved, _ := m.configRepo.GetPrinter(cfg.ID)
+	eventType := events.PrinterConfigurationChanged
+	switch {
+	case errors.Is(previousErr, config.ErrNotFound) && cfg.Enabled:
+		eventType = events.PrinterEnabled
+	case errors.Is(previousErr, config.ErrNotFound) && !cfg.Enabled:
+		eventType = events.PrinterDisabled
+	case previous.Enabled != cfg.Enabled && cfg.Enabled:
+		eventType = events.PrinterEnabled
+	case previous.Enabled != cfg.Enabled && !cfg.Enabled:
+		eventType = events.PrinterDisabled
+	}
+	m.bus.Publish(events.Event{Type: eventType, PrinterID: cfg.ID,
+		Metadata: map[string]any{"configurationGeneration": saved.ConfigurationGeneration}})
 	return nil
 }
 
@@ -245,7 +261,7 @@ func (m *Manager) RemovePrinter(id string) error {
 		return err
 	}
 	if active {
-		return jobs.NewConflictError("printer cannot be retired while queued, processing, or retry-pending Print Runs exist; disable it instead")
+		return jobs.NewConflictError("printer cannot be retired while queued, claimed, transmitting, or retry-pending Print Runs exist; disable it instead")
 	}
 	cfg, err := m.configRepo.GetPrinter(id)
 	if err != nil {
@@ -258,7 +274,7 @@ func (m *Manager) RemovePrinter(id string) error {
 		}
 		return err
 	}
-	m.bus.Publish(events.Event{Type: events.ConfigChanged, PrinterID: id, Message: "printer removed"})
+	m.bus.Publish(events.Event{Type: events.PrinterDisabled, PrinterID: id, Message: "printer retired"})
 	return nil
 }
 

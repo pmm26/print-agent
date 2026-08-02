@@ -18,7 +18,8 @@ var ErrNotFound = errors.New("not found")
 
 const printerCols = `id, display_name, enabled, transport, COALESCE(device_address, ''),
 	COALESCE(endpoint, ''), baud_rate, data_bits, stop_bits, parity,
-	characters_per_line, encoding, auto_reconnect, connection_preference, retired_at, created_at, updated_at`
+	characters_per_line, encoding, auto_reconnect, connection_preference,
+	configuration_generation, retired_at, created_at, updated_at`
 
 func scanPrinter(row interface{ Scan(...any) error }) (PrinterConfig, error) {
 	var p PrinterConfig
@@ -27,6 +28,7 @@ func scanPrinter(row interface{ Scan(...any) error }) (PrinterConfig, error) {
 	err := row.Scan(&p.ID, &p.DisplayName, &p.Enabled, &transport, &p.DeviceAddress,
 		&p.Endpoint, &p.BaudRate, &p.DataBits, &p.StopBits, &p.Parity,
 		&p.CharactersPerLine, &p.Encoding, &p.AutoReconnect, &p.ConnectionPreference,
+		&p.ConfigurationGeneration,
 		&retired, &created, &updated)
 	if err != nil {
 		return p, err
@@ -97,6 +99,7 @@ func (r *Repository) SavePrinter(p PrinterConfig) error {
 		 encoding = excluded.encoding,
 		 auto_reconnect = excluded.auto_reconnect,
 		 connection_preference = excluded.connection_preference,
+		 configuration_generation = printers.configuration_generation + 1,
 		 updated_at = excluded.updated_at
 		 WHERE printers.retired_at IS NULL`,
 		p.ID, p.DisplayName, p.Enabled, string(p.Transport), p.DeviceAddress, p.Endpoint,
@@ -140,8 +143,11 @@ func (r *Repository) SetEnabled(id string, enabled bool) error {
 
 // GetSetting returns a settings value, or "" when unset.
 func (r *Repository) GetSetting(key string) (string, error) {
+	if key != SettingAllowedOrigin {
+		return "", fmt.Errorf("unknown setting %q", key)
+	}
 	var v string
-	err := r.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
+	err := r.db.QueryRow(`SELECT COALESCE(allowed_pos_origin, '') FROM agent_settings WHERE singleton = 1`).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -150,8 +156,23 @@ func (r *Repository) GetSetting(key string) (string, error) {
 
 // SetSetting upserts a settings value.
 func (r *Repository) SetSetting(key, value string) error {
-	_, err := r.db.Exec(`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
-		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-		key, value, time.Now().UTC().Format(time.RFC3339Nano))
-	return err
+	if key != SettingAllowedOrigin {
+		return fmt.Errorf("unknown setting %q", key)
+	}
+	result, err := r.db.Exec(`UPDATE agent_settings SET allowed_pos_origin = ?, updated_at = ? WHERE singleton = 1`,
+		nullableSetting(value), time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return errors.New("agent settings are not initialized")
+	}
+	return nil
+}
+
+func nullableSetting(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
