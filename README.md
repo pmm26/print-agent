@@ -221,15 +221,19 @@ Applied migrations are checksummed and startup runs SQLite `quick_check`.
 ## Development
 
 ```sh
+cd internal/webui/frontend
+npm ci
+npm run build    # creates the ignored bundle required by go:embed
+cd ../../..
 go test ./...   # unit + integration (mock transports with scripted failures)
 go vet ./...
 ```
 
 The embedded admin dashboard is a React 19 + TypeScript application using
 Vite, React Router, TanStack Query, Tailwind CSS, and shadcn/Base UI. Its
-source lives in `internal/webui/frontend`; the production bundle in
-`internal/webui/dist` is committed so building the Go binary does not require
-Node.js.
+source lives in `internal/webui/frontend`. Vite generates the ignored
+production bundle in `internal/webui/dist`; build it before compiling or
+testing Go code from a clean checkout.
 
 ```sh
 cd internal/webui/frontend
@@ -238,8 +242,8 @@ npm run dev      # Vite dev server; proxies /api/v1 to the running agent
 npm run check    # typecheck, lint, unit tests, and production build
 ```
 
-After changing the dashboard, commit both the source and regenerated `dist`
-files. CI rebuilds the bundle and rejects stale generated assets.
+Commit dashboard source only. Do not commit regenerated `dist` files. CI
+builds the dashboard before compiling the embedded Go application.
 
 Architecture (one worker per printer, no shared locks on the print path):
 

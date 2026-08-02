@@ -2,6 +2,7 @@
 /print-agent
 /btprobe
 /dist/
+/internal/webui/dist/
 
 # local agent data (never commit the queue DB or logs)
 *.db
