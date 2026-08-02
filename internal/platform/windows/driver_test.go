@@ -89,7 +89,7 @@ func TestEnsureConnectedResolvesMovedCOMPortByAddress(t *testing.T) {
 	}
 }
 
-func TestLinkStateUsesBluetoothWhenKnownAndCOMPresenceFallback(t *testing.T) {
+func TestLinkStateRequiresBluetoothConnectionEvidence(t *testing.T) {
 	driver := &Driver{
 		ports: func(context.Context) ([]portRecord, error) {
 			return []portRecord{{Name: "COM8", Enumerator: "BTHENUM", Address: "AA:BB:CC:DD:EE:FF"}}, nil
@@ -111,7 +111,37 @@ func TestLinkStateUsesBluetoothWhenKnownAndCOMPresenceFallback(t *testing.T) {
 
 	driver.bluetooth = nil
 	state, err = driver.LinkState(context.Background(), config.PrinterConfig{Endpoint: "COM8"})
-	if err != nil || state != platform.LinkConnected {
-		t.Fatalf("fallback state = %s, err = %v", state, err)
+	if err == nil || state != platform.LinkUnknown {
+		t.Fatalf("unverified state = %s, err = %v", state, err)
+	}
+}
+
+func TestLinkStateDoesNotTreatCOMPresenceAsConnected(t *testing.T) {
+	driver := &Driver{
+		ports: func(context.Context) ([]portRecord, error) {
+			return []portRecord{{Name: "COM8", Enumerator: "BTHENUM"}}, nil
+		},
+		bluetooth: func(context.Context) ([]bluetoothRecord, error) {
+			return nil, nil
+		},
+	}
+	state, err := driver.LinkState(context.Background(), config.PrinterConfig{Endpoint: "COM8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != platform.LinkUnknown {
+		t.Fatalf("state = %s, want unknown", state)
+	}
+}
+
+func TestEnsureConnectedRejectsInvalidAddressBeforeEndpointFallback(t *testing.T) {
+	driver := &Driver{
+		ports: func(context.Context) ([]portRecord, error) {
+			t.Fatal("port enumeration should not run for an invalid address")
+			return nil, nil
+		},
+	}
+	if _, err := driver.EnsureConnected(context.Background(), config.PrinterConfig{Endpoint: "COM8", DeviceAddress: "invalid"}); err == nil {
+		t.Fatal("EnsureConnected accepted an invalid Bluetooth address")
 	}
 }

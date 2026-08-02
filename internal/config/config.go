@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"strings"
 	"time"
@@ -99,10 +100,17 @@ func (p *PrinterConfig) Validate() error {
 	if len(p.Endpoint) > 512 || len(p.DeviceAddress) > 64 {
 		return errors.New("printer endpoint or device address is too long")
 	}
+	if p.DeviceAddress != "" {
+		address := strings.ReplaceAll(strings.TrimSpace(p.DeviceAddress), "-", ":")
+		hardwareAddress, err := net.ParseMAC(address)
+		if err != nil || len(hardwareAddress) != 6 {
+			return errors.New("deviceAddress must be a six-byte Bluetooth address")
+		}
+	}
 	lowerEndpoint := strings.ToLower(p.Endpoint)
 	if strings.HasPrefix(lowerEndpoint, "rfcomm://") || strings.HasPrefix(lowerEndpoint, "ble://") {
 		endpointAddress := strings.TrimPrefix(strings.TrimPrefix(lowerEndpoint, "rfcomm://"), "ble://")
-		normalizedDevice := strings.ToLower(strings.ReplaceAll(p.DeviceAddress, "-", ":"))
+		normalizedDevice := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(p.DeviceAddress), "-", ":"))
 		if normalizedDevice != "" && endpointAddress != normalizedDevice {
 			return errors.New("deviceAddress must match the Bluetooth address in endpoint")
 		}

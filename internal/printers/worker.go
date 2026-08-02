@@ -364,8 +364,8 @@ func (w *worker) process(ctx context.Context, run jobs.PrintRun) {
 	w.mu.Unlock()
 	err = tr.Write(ctx, doc)
 	if err == nil {
-		// The OS accepted every byte, but on macOS that only means they were
-		// buffered. Claim `transmitted` only while the Bluetooth link is
+		// The OS accepted every byte, but a Bluetooth serial stack may only have
+		// buffered them. Claim `transmitted` only while the Bluetooth link is
 		// confirmed up; otherwise the ticket's fate is unknowable.
 		state, verr := w.linkState(ctx, activeCfg)
 		if verr != nil || state != platform.LinkConnected {

@@ -36,5 +36,7 @@ describe('Bluetooth pairing', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Add printer' }))
 
     expect(await screen.findByRole('dialog')).toHaveTextContent('Add printer')
+    await userEvent.type(screen.getByLabelText('Endpoint'), 'COM7')
+    expect(screen.getByLabelText('Endpoint')).toHaveValue('COM7')
   })
 })

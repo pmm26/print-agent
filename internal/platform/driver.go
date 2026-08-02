@@ -15,9 +15,9 @@ import (
 )
 
 // ErrNotConnected is returned by VerifyConnected when the OS positively
-// reports the paired device as disconnected. On macOS, serial opens and
-// writes to /dev/cu.* succeed (buffered by the OS) even with the printer
-// off, so the write path alone cannot detect a dead link.
+// reports the paired device as disconnected. Some Bluetooth serial stacks
+// can accept buffered writes while the printer is off, so the write path
+// alone cannot detect a dead link.
 var ErrNotConnected = errors.New("device is paired but not connected")
 
 // Bluetooth management errors let the local API return useful, stable error

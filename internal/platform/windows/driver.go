@@ -103,7 +103,10 @@ func (d *Driver) ListCandidates(ctx context.Context) ([]platform.Candidate, erro
 
 func (d *Driver) EnsureConnected(ctx context.Context, cfg config.PrinterConfig) (string, error) {
 	configured := normalizeCOMPort(cfg.Endpoint)
-	address, addressErr := normalizeOptionalAddress(cfg.DeviceAddress)
+	address, err := normalizeOptionalAddress(cfg.DeviceAddress)
+	if err != nil {
+		return "", err
+	}
 	ports, err := d.portRecords(ctx)
 	if err != nil {
 		if configured != "" {
@@ -123,9 +126,6 @@ func (d *Driver) EnsureConnected(ctx context.Context, cfg config.PrinterConfig) 
 			}
 		}
 		return configured, nil
-	}
-	if addressErr != nil {
-		return "", addressErr
 	}
 	if address != "" {
 		return "", fmt.Errorf("paired Bluetooth device %s has no Windows COM port; open Bluetooth settings and confirm the printer exposes Serial Port Profile", address)
@@ -149,33 +149,35 @@ func (d *Driver) VerifyConnected(ctx context.Context, cfg config.PrinterConfig) 
 }
 
 func (d *Driver) LinkState(ctx context.Context, cfg config.PrinterConfig) (platform.LinkState, error) {
-	address, _ := normalizeOptionalAddress(cfg.DeviceAddress)
+	address, err := normalizeOptionalAddress(cfg.DeviceAddress)
+	if err != nil {
+		return platform.LinkUnknown, err
+	}
 	ports, portErr := d.portRecords(ctx)
-	if address == "" {
-		address = addressForEndpoint(ports, cfg.Endpoint)
-	}
-
-	if address != "" {
-		bt, btErr := d.bluetoothRecords(ctx)
-		if btErr == nil {
-			for _, dev := range bt {
-				if dev.Address == address {
-					if dev.Connected {
-						return platform.LinkConnected, nil
-					}
-					if dev.Authenticated || dev.Remembered {
-						return platform.LinkDisconnected, nil
-					}
-				}
-			}
-		}
-	}
-
 	if portErr != nil {
 		return platform.LinkUnknown, portErr
 	}
-	if cfg.Endpoint != "" && endpointPresent(ports, cfg.Endpoint) {
-		return platform.LinkConnected, nil
+	if address == "" {
+		address = addressForEndpoint(ports, cfg.Endpoint)
+	}
+	if address == "" {
+		// A virtual COM port can remain installed while its Bluetooth device is
+		// powered off. Port presence alone is never connection evidence.
+		return platform.LinkUnknown, nil
+	}
+
+	bt, err := d.bluetoothRecords(ctx)
+	if err != nil {
+		return platform.LinkUnknown, err
+	}
+	for _, dev := range bt {
+		if dev.Address != address {
+			continue
+		}
+		if dev.Connected {
+			return platform.LinkConnected, nil
+		}
+		return platform.LinkDisconnected, nil
 	}
 	return platform.LinkUnknown, nil
 }
@@ -222,13 +224,4 @@ func addressForEndpoint(ports []portRecord, endpoint string) string {
 		}
 	}
 	return ""
-}
-
-func endpointPresent(ports []portRecord, endpoint string) bool {
-	for _, p := range ports {
-		if sameCOMPort(p.Name, endpoint) {
-			return true
-		}
-	}
-	return false
 }

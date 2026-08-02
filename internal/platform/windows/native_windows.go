@@ -5,6 +5,7 @@ package windows
 import (
 	"context"
 	"errors"
+	"fmt"
 	"syscall"
 	"unsafe"
 
@@ -29,7 +30,7 @@ type bluetoothSearchParams struct {
 	ReturnConnected     int32
 	IssueInquiry        int32
 	TimeoutMultiplier   uint8
-	_                   [7]byte
+	_                   [unsafe.Sizeof(uintptr(0)) - 1]byte
 	Radio               win.Handle
 }
 
@@ -55,11 +56,17 @@ func nativePortRecords(ctx context.Context) ([]portRecord, error) {
 		return nil, err
 	}
 	var out []portRecord
+	var firstSetErr error
+	openedSet := false
 	for _, guid := range guids {
 		set, err := win.SetupDiGetClassDevsEx(&guid, "", 0, win.DIGCF_PRESENT, 0, "")
 		if err != nil {
+			if firstSetErr == nil {
+				firstSetErr = err
+			}
 			continue
 		}
+		openedSet = true
 		for index := 0; ; index++ {
 			if err := ctx.Err(); err != nil {
 				set.Close()
@@ -67,7 +74,11 @@ func nativePortRecords(ctx context.Context) ([]portRecord, error) {
 			}
 			dev, err := set.EnumDeviceInfo(index)
 			if err != nil {
-				break
+				if errors.Is(err, win.ERROR_NO_MORE_ITEMS) {
+					break
+				}
+				set.Close()
+				return nil, fmt.Errorf("enumerate Windows COM devices: %w", err)
 			}
 			portName, err := portNameFromDevice(set, dev)
 			if err != nil || portName == "" {
@@ -85,6 +96,9 @@ func nativePortRecords(ctx context.Context) ([]portRecord, error) {
 			out = append(out, record)
 		}
 		set.Close()
+	}
+	if !openedSet && firstSetErr != nil {
+		return nil, fmt.Errorf("open Windows COM device information: %w", firstSetErr)
 	}
 	return out, nil
 }
@@ -147,7 +161,7 @@ func nativeBluetoothRecords(ctx context.Context) ([]bluetoothRecord, error) {
 			if errors.Is(err, win.ERROR_NO_MORE_ITEMS) {
 				break
 			}
-			break
+			return nil, fmt.Errorf("enumerate Windows Bluetooth devices: %w", err)
 		}
 	}
 	return out, nil
