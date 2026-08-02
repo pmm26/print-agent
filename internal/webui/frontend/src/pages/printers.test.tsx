@@ -17,7 +17,7 @@ describe('Printer log navigation', () => {
   })
 
   it('saves a manually entered endpoint without a stale discovered address', async () => {
-    let payload: { endpoint?: string; deviceAddress?: string } = {}
+    let payload: { endpoint?: string; deviceAddress?: string; connectionPreference?: string } = {}
     server.use(
       http.get('/api/v1/bluetooth/candidates', () => HttpResponse.json([{ endpoint: 'COM8', deviceName: 'Kitchen printer', deviceAddress: 'AA:BB:CC:DD:EE:FF', connected: true, isPrinter: true }])),
       http.post('/api/v1/printers', async ({ request }) => {
@@ -37,5 +37,13 @@ describe('Printer log navigation', () => {
 
     await waitFor(() => expect(payload.endpoint).toBe('COM7'))
     expect(payload.deviceAddress).toBe('')
+    expect(payload.connectionPreference).toBe('auto')
+  })
+
+  it('preserves a protocol-specific connection preference from device setup', async () => {
+    renderApp(<Routes><Route element={<AppShell />}><Route path="setup/printers" element={<PrintersPage />} /></Route></Routes>, '/setup/printers?newEndpoint=rfcomm%3A%2F%2FAA%3ABB%3ACC%3ADD%3AEE%3AFF&deviceAddress=AA%3ABB%3ACC%3ADD%3AEE%3AFF&connectionPreference=rfcomm')
+
+    expect(await screen.findByLabelText('Endpoint')).toHaveValue('rfcomm://AA:BB:CC:DD:EE:FF')
+    expect(screen.getByLabelText('Default connection type')).toHaveValue('rfcomm')
   })
 })

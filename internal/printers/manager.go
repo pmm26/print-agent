@@ -39,12 +39,13 @@ type Manager struct {
 	bus        *events.Bus
 	factory    TransportFactory
 
-	mu          sync.Mutex
-	lifecycleMu sync.RWMutex
-	ctx         context.Context
-	started     bool
-	workers     map[string]*worker
-	gate        *persistenceGate
+	mu           sync.Mutex
+	lifecycleMu  sync.RWMutex
+	ctx          context.Context
+	started      bool
+	workers      map[string]*worker
+	gate         *persistenceGate
+	transmission *transmissionGate
 }
 
 func NewManager(configRepo *config.Repository, jobsRepo *jobs.Repository,
@@ -53,14 +54,15 @@ func NewManager(configRepo *config.Repository, jobsRepo *jobs.Repository,
 		factory = driverTransportFactory(driver)
 	}
 	return &Manager{
-		configRepo: configRepo,
-		jobsRepo:   jobsRepo,
-		renderer:   escpos.NewRenderer(),
-		driver:     driver,
-		bus:        bus,
-		factory:    factory,
-		workers:    map[string]*worker{},
-		gate:       newPersistenceGate(),
+		configRepo:   configRepo,
+		jobsRepo:     jobsRepo,
+		renderer:     escpos.NewRenderer(),
+		driver:       driver,
+		bus:          bus,
+		factory:      factory,
+		workers:      map[string]*worker{},
+		gate:         newPersistenceGate(),
+		transmission: newTransmissionGate(),
 	}
 }
 
@@ -119,6 +121,7 @@ func (m *Manager) BeginAcceptance() func() {
 func (m *Manager) startWorker(cfg config.PrinterConfig) {
 	w := newWorker(cfg, m.jobsRepo, m.renderer, m.driver, m.bus, m.factory)
 	w.gate = m.gate
+	w.transmission = m.transmission
 	m.mu.Lock()
 	ctx := m.ctx
 	m.mu.Unlock()

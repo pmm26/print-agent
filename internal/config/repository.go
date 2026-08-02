@@ -18,7 +18,7 @@ var ErrNotFound = errors.New("not found")
 
 const printerCols = `id, display_name, enabled, transport, COALESCE(device_address, ''),
 	COALESCE(endpoint, ''), baud_rate, data_bits, stop_bits, parity,
-	characters_per_line, encoding, auto_reconnect, retired_at, created_at, updated_at`
+	characters_per_line, encoding, auto_reconnect, connection_preference, retired_at, created_at, updated_at`
 
 func scanPrinter(row interface{ Scan(...any) error }) (PrinterConfig, error) {
 	var p PrinterConfig
@@ -26,7 +26,8 @@ func scanPrinter(row interface{ Scan(...any) error }) (PrinterConfig, error) {
 	var retired sql.NullString
 	err := row.Scan(&p.ID, &p.DisplayName, &p.Enabled, &transport, &p.DeviceAddress,
 		&p.Endpoint, &p.BaudRate, &p.DataBits, &p.StopBits, &p.Parity,
-		&p.CharactersPerLine, &p.Encoding, &p.AutoReconnect, &retired, &created, &updated)
+		&p.CharactersPerLine, &p.Encoding, &p.AutoReconnect, &p.ConnectionPreference,
+		&retired, &created, &updated)
 	if err != nil {
 		return p, err
 	}
@@ -80,8 +81,8 @@ func (r *Repository) SavePrinter(p PrinterConfig) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := r.db.Exec(`INSERT INTO printers
 		(id, display_name, enabled, transport, device_address, endpoint, baud_rate, data_bits,
-		 stop_bits, parity, characters_per_line, encoding, auto_reconnect, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 stop_bits, parity, characters_per_line, encoding, auto_reconnect, connection_preference, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		 display_name = excluded.display_name,
 		 enabled = excluded.enabled,
@@ -95,11 +96,12 @@ func (r *Repository) SavePrinter(p PrinterConfig) error {
 		 characters_per_line = excluded.characters_per_line,
 		 encoding = excluded.encoding,
 		 auto_reconnect = excluded.auto_reconnect,
+		 connection_preference = excluded.connection_preference,
 		 updated_at = excluded.updated_at
 		 WHERE printers.retired_at IS NULL`,
 		p.ID, p.DisplayName, p.Enabled, string(p.Transport), p.DeviceAddress, p.Endpoint,
 		p.BaudRate, p.DataBits, p.StopBits, p.Parity, p.CharactersPerLine,
-		p.Encoding, p.AutoReconnect, now, now)
+		p.Encoding, p.AutoReconnect, p.ConnectionPreference, now, now)
 	if err != nil {
 		return err
 	}

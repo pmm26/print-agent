@@ -17,16 +17,17 @@ func TestPrinterConfigValidatesDeviceAddress(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := PrinterConfig{
-				ID:                "kitchen",
-				DisplayName:       "Kitchen",
-				Transport:         TransportBluetoothSerial,
-				DeviceAddress:     test.address,
-				Endpoint:          "COM7",
-				BaudRate:          9600,
-				DataBits:          8,
-				StopBits:          1,
-				Parity:            ParityNone,
-				CharactersPerLine: 32,
+				ID:                   "kitchen",
+				DisplayName:          "Kitchen",
+				Transport:            TransportBluetoothSerial,
+				DeviceAddress:        test.address,
+				Endpoint:             "COM7",
+				ConnectionPreference: ConnectionAuto,
+				BaudRate:             9600,
+				DataBits:             8,
+				StopBits:             1,
+				Parity:               ParityNone,
+				CharactersPerLine:    32,
 			}
 			err := cfg.Validate()
 			if (err != nil) != test.wantErr {

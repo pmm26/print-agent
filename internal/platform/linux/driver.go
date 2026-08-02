@@ -54,9 +54,11 @@ type deviceSource interface {
 }
 
 type bluetoothController interface {
-	StartDiscovery(context.Context) error
+	StartDiscovery(context.Context, config.ConnectionPreference) error
 	StopDiscovery(context.Context) error
 	PairDevice(context.Context, string, string) error
+	DisconnectDevice(context.Context, string) error
+	ForgetDevice(context.Context, string) error
 }
 
 type profileConnector interface {
@@ -133,11 +135,11 @@ func (d *Driver) ListBluetoothDevices(ctx context.Context) ([]platform.Bluetooth
 	return out, nil
 }
 
-func (d *Driver) StartBluetoothDiscovery(ctx context.Context) error {
+func (d *Driver) StartBluetoothDiscovery(ctx context.Context, connectionType config.ConnectionPreference) error {
 	if d.bluetooth == nil {
 		return errors.New("BlueZ discovery is unavailable")
 	}
-	return d.bluetooth.StartDiscovery(ctx)
+	return d.bluetooth.StartDiscovery(ctx, connectionType)
 }
 
 func (d *Driver) StopBluetoothDiscovery(ctx context.Context) error {
@@ -147,7 +149,7 @@ func (d *Driver) StopBluetoothDiscovery(ctx context.Context) error {
 	return d.bluetooth.StopDiscovery(ctx)
 }
 
-func (d *Driver) PairBluetoothDevice(ctx context.Context, address, pin string) (platform.BluetoothDevice, error) {
+func (d *Driver) PairBluetoothDevice(ctx context.Context, address, pin string, connectionType config.ConnectionPreference) (platform.BluetoothDevice, error) {
 	if d.bluetooth == nil {
 		return platform.BluetoothDevice{}, platform.ErrBluetoothUnavailable
 	}
@@ -159,8 +161,16 @@ func (d *Driver) PairBluetoothDevice(ctx context.Context, address, pin string) (
 	if err != nil {
 		return platform.BluetoothDevice{}, err
 	}
+	if connectionType == "" {
+		connectionType = config.ConnectionAuto
+	}
+	if !supportsConnection(device, connectionType) {
+		return platform.BluetoothDevice{}, fmt.Errorf("%w: device %s does not support %s", platform.ErrBluetoothProtocolUnsupported, normalized, connectionType)
+	}
 	ready := publicBluetoothDevice(device, normalized)
-	if ready.Endpoint != "" {
+	if ready.Endpoint != "" && connectionType != config.ConnectionRFCOMM ||
+		(connectionType == config.ConnectionRFCOMM && (device.Paired || device.Bonded)) {
+		ready.Endpoint = preferredEndpoint(connectionType, device, normalized)
 		return ready, nil
 	}
 	if err := d.bluetooth.PairDevice(ctx, normalized, pin); err != nil {
@@ -170,7 +180,25 @@ func (d *Driver) PairBluetoothDevice(ctx context.Context, address, pin string) (
 	if err != nil {
 		return platform.BluetoothDevice{}, err
 	}
-	return publicBluetoothDevice(device, normalized), nil
+	result := publicBluetoothDevice(device, normalized)
+	result.Endpoint = preferredEndpoint(connectionType, device, normalized)
+	return result, nil
+}
+
+func (d *Driver) DisconnectBluetoothDevice(ctx context.Context, address string) error {
+	normalized, err := normalizeAddress(address)
+	if err != nil {
+		return fmt.Errorf("%w: %v", platform.ErrInvalidBluetoothAddress, err)
+	}
+	return d.bluetooth.DisconnectDevice(ctx, normalized)
+}
+
+func (d *Driver) ForgetBluetoothDevice(ctx context.Context, address string) error {
+	normalized, err := normalizeAddress(address)
+	if err != nil {
+		return fmt.Errorf("%w: %v", platform.ErrInvalidBluetoothAddress, err)
+	}
+	return d.bluetooth.ForgetDevice(ctx, normalized)
 }
 
 func (d *Driver) bluetoothDevice(ctx context.Context, address string) (bluezDevice, error) {
@@ -195,10 +223,33 @@ func publicBluetoothDevice(dev bluezDevice, address string) platform.BluetoothDe
 		Connected: dev.Connected,
 		IsPrinter: isPrinterDevice(dev),
 	}
+	if hasUUID(dev.UUIDs, serialPortUUID) {
+		item.SupportedConnectionTypes = append(item.SupportedConnectionTypes, config.ConnectionRFCOMM)
+	}
+	if hasUUID(dev.UUIDs, blePrintServiceUUID) {
+		item.SupportedConnectionTypes = append(item.SupportedConnectionTypes, config.ConnectionBLE)
+	}
 	if isUsableCandidate(dev) {
 		item.Endpoint = endpointForDevice(dev, address)
 	}
 	return item
+}
+
+func supportsConnection(dev bluezDevice, preference config.ConnectionPreference) bool {
+	return preference == "" || preference == config.ConnectionAuto ||
+		(preference == config.ConnectionRFCOMM && hasUUID(dev.UUIDs, serialPortUUID)) ||
+		(preference == config.ConnectionBLE && hasUUID(dev.UUIDs, blePrintServiceUUID))
+}
+
+func preferredEndpoint(preference config.ConnectionPreference, dev bluezDevice, address string) string {
+	switch preference {
+	case config.ConnectionRFCOMM:
+		return rfcommEndpoint(address)
+	case config.ConnectionBLE:
+		return bleEndpoint(address)
+	default:
+		return endpointForDevice(dev, address)
+	}
 }
 
 // ListCandidates returns paired SPP devices and printers which BlueZ already
@@ -266,7 +317,13 @@ func (d *Driver) EnsureConnected(ctx context.Context, cfg config.PrinterConfig) 
 		if len(dev.UUIDs) > 0 && !hasUUID(dev.UUIDs, serialPortUUID) && !isPrinterDevice(dev) {
 			return "", fmt.Errorf("Bluetooth device %s does not advertise the Serial Port Profile", address)
 		}
-		endpoint := endpointForDevice(dev, address)
+		endpoint := preferredEndpoint(cfg.ConnectionPreference, dev, address)
+		if !supportsConnection(dev, cfg.ConnectionPreference) {
+			return "", fmt.Errorf("%w: Bluetooth device %s does not support preferred %s connection", platform.ErrBluetoothProtocolUnsupported, address, cfg.ConnectionPreference)
+		}
+		if cfg.ConnectionPreference == config.ConnectionRFCOMM && !(dev.Paired || dev.Bonded) {
+			return "", fmt.Errorf("Bluetooth device %s must be paired before using RFCOMM", address)
+		}
 		d.setRoute(address, endpoint)
 		return endpoint, nil
 	}

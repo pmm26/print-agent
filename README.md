@@ -245,9 +245,13 @@ npm run check    # typecheck, lint, unit tests, and production build
 Commit dashboard source only. Do not commit regenerated `dist` files. CI
 builds the dashboard before compiling the embedded Go application.
 
-Architecture (one worker per printer, no shared locks on the print path):
+Architecture (one worker per printer with a process-wide transmission permit):
 
 ```
 HTTP handler → JobService → SQLite tx → wake channel → printer worker
-                                          worker: claim → render ESC/POS → write (chunked, watchdog)
+                                          worker: acquire permit → claim → render ESC/POS
+                                                  → write + verify → persist → release
 ```
+
+Connections and reconnects remain independent, but at most one ESC/POS print
+attempt is active across the agent at any time.

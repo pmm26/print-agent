@@ -1,5 +1,6 @@
 export type RunStatus = 'queued' | 'processing' | 'transmitted' | 'failed' | 'uncertain' | 'cancelled'
 export type RunTrigger = 'initial' | 'automatic_retry' | 'manual_reprint'
+export type ConnectionPreference = 'auto' | 'rfcomm' | 'ble'
 
 export interface PrintRun {
   uid: string
@@ -58,6 +59,7 @@ export interface PrinterConfig {
   transport: string
   deviceAddress?: string
   endpoint: string
+  connectionPreference: ConnectionPreference
   baudRate: number
   dataBits: number
   stopBits: number
@@ -103,6 +105,7 @@ export interface BluetoothDevice {
   connected: boolean
   isPrinter: boolean
   endpoint?: string
+  supportedConnectionTypes?: ConnectionPreference[]
 }
 
 export interface BluetoothDevices { supported: boolean; scanning: boolean; devices: BluetoothDevice[] }

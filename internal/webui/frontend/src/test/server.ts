@@ -3,7 +3,7 @@ import { setupServer } from 'msw/node'
 
 const status = {
   agent: { version: 'test', databaseOk: true }, degraded: false, persistence: { paused: false },
-  printers: [{ printer: { id: 'kitchen', displayName: 'Kitchen', enabled: true, transport: 'mock', endpoint: 'mock://kitchen', baudRate: 9600, dataBits: 8, stopBits: 1, parity: 'none', charactersPerLine: 32, encoding: 'CP858', autoReconnect: true }, state: 'connected', endpoint: 'mock://kitchen', queueDepth: 0, attentionCount: 0 }],
+  printers: [{ printer: { id: 'kitchen', displayName: 'Kitchen', enabled: true, transport: 'mock', endpoint: 'mock://kitchen', connectionPreference: 'auto', baudRate: 9600, dataBits: 8, stopBits: 1, parity: 'none', charactersPerLine: 32, encoding: 'CP858', autoReconnect: true }, state: 'connected', endpoint: 'mock://kitchen', queueDepth: 0, attentionCount: 0 }],
 }
 
 export const handlers = [
@@ -11,6 +11,8 @@ export const handlers = [
   http.get('/api/v1/jobs', () => HttpResponse.json({ jobs: [], nextCursor: '' })),
   http.get('/api/v1/bluetooth/devices', () => HttpResponse.json({ supported: true, devices: [] })),
   http.get('/api/v1/bluetooth/candidates', () => HttpResponse.json([])),
+  http.post('/api/v1/bluetooth/discovery/start', () => HttpResponse.json({ scanning: true })),
+  http.post('/api/v1/bluetooth/discovery/stop', () => HttpResponse.json({ scanning: false })),
   http.get('/api/v1/admin/settings', () => HttpResponse.json({ allowedOrigin: 'https://pos.example.test' })),
   http.get('/api/v1/admin/tokens', () => HttpResponse.json([])),
   http.get('/api/v1/printers/:printerId/queue', () => HttpResponse.json({ printer: status.printers[0], processingRun: null, queuedRuns: [], retryPendingRuns: [], attentionRuns: [], recentTransmittedRuns: [] })),

@@ -146,6 +146,49 @@ func TestMultiplePrintersFulfillOneJob(t *testing.T) {
 	}
 }
 
+func TestMultiplePrintersTransmitOneAtATime(t *testing.T) {
+	h := newHarness(t, "cashier", "kitchen")
+	started := make(chan struct{}, 2)
+	release := make(chan struct{}, 2)
+	var active atomic.Int32
+	var maximum atomic.Int32
+	onWrite := func([]byte) {
+		n := active.Add(1)
+		for old := maximum.Load(); n > old && !maximum.CompareAndSwap(old, n); old = maximum.Load() {
+		}
+		started <- struct{}{}
+		<-release
+		active.Add(-1)
+	}
+	h.mock("cashier").SetOnWrite(onWrite)
+	h.mock("kitchen").SetOnWrite(onWrite)
+
+	job := h.submit("serialized", "cashier", "kitchen")
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first printer did not start transmitting")
+	}
+	select {
+	case <-started:
+		t.Fatal("second printer transmitted before the first completed")
+	case <-time.After(200 * time.Millisecond):
+	}
+	release <- struct{}{}
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("second printer did not start after the first completed")
+	}
+	release <- struct{}{}
+
+	h.waitRun(initialRun(job, "cashier").UID, jobs.RunTransmitted, 4*time.Second)
+	h.waitRun(initialRun(job, "kitchen").UID, jobs.RunTransmitted, 4*time.Second)
+	if got := maximum.Load(); got != 1 {
+		t.Fatalf("maximum concurrent transmissions = %d, want 1", got)
+	}
+}
+
 func TestOfflinePrinterDoesNotCreateRuns(t *testing.T) {
 	h := newHarness(t, "kitchen")
 	h.driver.linkDown.Store(true)

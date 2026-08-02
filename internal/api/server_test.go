@@ -30,22 +30,34 @@ type stubDriver struct{ platform.UnimplementedDriver }
 
 type pairingStubDriver struct {
 	stubDriver
-	result  platform.BluetoothDevice
-	pairErr error
-	address string
-	pin     string
+	result       platform.BluetoothDevice
+	pairErr      error
+	address      string
+	pin          string
+	disconnected string
+	forgotten    string
 }
 
 func (d *pairingStubDriver) ListBluetoothDevices(context.Context) ([]platform.BluetoothDevice, error) {
 	return []platform.BluetoothDevice{d.result}, nil
 }
 
-func (d *pairingStubDriver) StartBluetoothDiscovery(context.Context) error { return nil }
-func (d *pairingStubDriver) StopBluetoothDiscovery(context.Context) error  { return nil }
-func (d *pairingStubDriver) PairBluetoothDevice(_ context.Context, address, pin string) (platform.BluetoothDevice, error) {
+func (d *pairingStubDriver) StartBluetoothDiscovery(context.Context, config.ConnectionPreference) error {
+	return nil
+}
+func (d *pairingStubDriver) StopBluetoothDiscovery(context.Context) error { return nil }
+func (d *pairingStubDriver) PairBluetoothDevice(_ context.Context, address, pin string, _ config.ConnectionPreference) (platform.BluetoothDevice, error) {
 	d.address = address
 	d.pin = pin
 	return d.result, d.pairErr
+}
+func (d *pairingStubDriver) DisconnectBluetoothDevice(_ context.Context, address string) error {
+	d.disconnected = address
+	return nil
+}
+func (d *pairingStubDriver) ForgetBluetoothDevice(_ context.Context, address string) error {
+	d.forgotten = address
+	return nil
 }
 
 func newTestServer(t *testing.T) (*httptest.Server, *AuthService, *jobs.Repository, *appLogging.Store) {
@@ -103,6 +115,34 @@ func TestPairBluetoothDeviceReturnsTruthfulReadyDevice(t *testing.T) {
 	}
 	if driver.address != "5A:4A:95:56:6F:B6" || driver.pin != "0000" {
 		t.Fatalf("pair call = address %q, pin %q", driver.address, driver.pin)
+	}
+}
+
+func TestBluetoothDisconnectAndForgetManagement(t *testing.T) {
+	driver := &pairingStubDriver{}
+	ts, _, _, _ := newTestServerWithDriver(t, driver, slog.New(slog.DiscardHandler))
+	address := "5A%3A4A%3A95%3A56%3A6F%3AB6"
+	resp := request(t, http.MethodPost, ts.URL+"/api/v1/bluetooth/devices/"+address+"/disconnect", ``, nil)
+	if resp.StatusCode != http.StatusOK || driver.disconnected != "5A:4A:95:56:6F:B6" {
+		t.Fatalf("disconnect = %d %q", resp.StatusCode, driver.disconnected)
+	}
+	resp = request(t, http.MethodDelete, ts.URL+"/api/v1/bluetooth/devices/"+address, ``, nil)
+	if resp.StatusCode != http.StatusOK || driver.forgotten != "5A:4A:95:56:6F:B6" {
+		t.Fatalf("forget = %d %q", resp.StatusCode, driver.forgotten)
+	}
+}
+
+func TestForgetConfiguredBluetoothDeviceIsBlocked(t *testing.T) {
+	driver := &pairingStubDriver{}
+	ts, _, _, _ := newTestServerWithDriver(t, driver, slog.New(slog.DiscardHandler))
+	resp := request(t, http.MethodPut, ts.URL+"/api/v1/printers/cashier",
+		`{"deviceAddress":"5A:4A:95:56:6F:B6","endpoint":"ble://5A:4A:95:56:6F:B6"}`, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("update status = %d", resp.StatusCode)
+	}
+	resp = request(t, http.MethodDelete, ts.URL+"/api/v1/bluetooth/devices/5A%3A4A%3A95%3A56%3A6F%3AB6", ``, nil)
+	if resp.StatusCode != http.StatusConflict || driver.forgotten != "" {
+		t.Fatalf("forget = %d %q", resp.StatusCode, driver.forgotten)
 	}
 }
 
