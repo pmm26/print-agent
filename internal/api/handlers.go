@@ -14,6 +14,7 @@ import (
 	"print-agent/internal/config"
 	"print-agent/internal/diagnostics"
 	"print-agent/internal/escpos"
+	"print-agent/internal/events"
 	"print-agent/internal/jobs"
 	appLogging "print-agent/internal/logging"
 	"print-agent/internal/platform"
@@ -39,7 +40,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	if result.Duplicate {
 		status = http.StatusOK
 	}
-	w.Header().Set("Location", "/api/v1/jobs/"+result.UID)
+	w.Header().Set("Location", "/api/v2/jobs/"+result.UID)
 	writeJSON(w, status, result)
 }
 
@@ -125,22 +126,66 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("status snapshot failed", "error", err)
 		statuses = []printers.Status{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"agent":       s.diag.Report(),
 		"platform":    s.driver.Name(),
 		"printers":    statuses,
 		"persistence": s.manager.PersistenceStatus(),
 		"degraded":    err != nil,
-	})
+	}
+	if s.runtimeStatus != nil {
+		response["events"] = s.runtimeStatus(r.Context())
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	s.handleReadiness(w, r)
+}
+
+func (s *Server) handleLiveness(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 	report := s.diag.Report()
+	persistence := s.manager.PersistenceStatus()
+	diskPressure := false
+	if s.runtimeStatus != nil {
+		if value, ok := s.runtimeStatus(r.Context())["diskPressure"].(bool); ok {
+			diskPressure = value
+		}
+	}
 	status := http.StatusOK
-	if !report.DatabaseOK {
+	if !report.DatabaseOK || persistence.Paused || diskPressure {
 		status = http.StatusServiceUnavailable
 	}
-	writeJSON(w, status, map[string]any{"ok": report.DatabaseOK, "databaseOk": report.DatabaseOK})
+	writeJSON(w, status, map[string]any{"ok": report.DatabaseOK && !persistence.Paused && !diskPressure,
+		"databaseOk": report.DatabaseOK, "persistencePaused": persistence.Paused, "eventDiskPressure": diskPressure})
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	statuses, err := s.manager.Statuses()
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var queued, attention int
+	for _, status := range statuses {
+		queued += status.QueueDepth
+		attention += status.AttentionCount
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprintf(w, "# TYPE print_agent_queue_depth gauge\nprint_agent_queue_depth %d\n", queued)
+	fmt.Fprintf(w, "# TYPE print_agent_attention_runs gauge\nprint_agent_attention_runs %d\n", attention)
+	if s.runtimeStatus != nil {
+		runtime := s.runtimeStatus(r.Context())
+		for key, metric := range map[string]string{"eventCount": "print_agent_event_log_depth", "pendingDeliveries": "print_agent_outbox_depth", "deadLetterCount": "print_agent_dead_letter_count", "droppedOperationalEvents": "print_agent_event_dropped_total"} {
+			if value, ok := runtime[key]; ok {
+				fmt.Fprintf(w, "# TYPE %s gauge\n%s %v\n", metric, metric, value)
+			}
+		}
+	}
 }
 
 // ---- pairing (POS-facing) ----
@@ -543,7 +588,7 @@ func (s *Server) handlePrinterQueue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	var processing *jobs.PrintRun
+	var active *jobs.PrintRun
 	queued := []jobs.PrintRun{}
 	retryPending := []jobs.PrintRun{}
 	attention := []jobs.PrintRun{}
@@ -551,9 +596,9 @@ func (s *Server) handlePrinterQueue(w http.ResponseWriter, r *http.Request) {
 	for i := range runs {
 		run := runs[i]
 		switch {
-		case run.Status == jobs.RunProcessing:
+		case run.Status == jobs.RunClaimed || run.Status == jobs.RunTransmitting:
 			copy := run
-			processing = &copy
+			active = &copy
 		case run.Status == jobs.RunQueued:
 			queued = append(queued, run)
 		case run.Status == jobs.RunFailed && run.Retryable && run.Resolution == "":
@@ -581,7 +626,7 @@ func (s *Server) handlePrinterQueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"printer": printerStatus, "processingRun": processing, "queuedRuns": queued,
+		"printer": printerStatus, "activeRun": active, "queuedRuns": queued,
 		"retryPendingRuns": retryPending, "attentionRuns": attention,
 		"recentTransmittedRuns": recentTransmitted,
 	})
@@ -789,21 +834,6 @@ func (s *Server) handleSystemLogs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func normalizeEventType(value string) string {
-	aliases := map[string]string{
-		"printer_connected": "printer.connected", "printer_disconnected": "printer.disconnected",
-		"printer_reconnecting": "printer.reconnecting", "printer_error": "printer.error",
-		"config_changed": "config.changed", "print_run_queued": "print_run.queued",
-		"print_run_processing": "print_run.processing", "print_run_transmitted": "print_run.transmitted",
-		"print_run_failed": "print_run.failed", "print_run_uncertain": "print_run.uncertain",
-		"print_run_cancelled": "print_run.cancelled", "print_run_resolved": "print_run.resolved",
-	}
-	if normalized, ok := aliases[value]; ok {
-		return normalized
-	}
-	return value
-}
-
 func (s *Server) handlePrinterLogs(w http.ResponseWriter, r *http.Request) {
 	values := r.URL.Query()
 	from, to, err := logRange(values)
@@ -838,7 +868,7 @@ func (s *Server) handlePrinterLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := logPageLimit(values.Get("limit"))
 	events, err := s.diag.PrinterEvents(diagnostics.EventFilter{
-		PrinterID: printerID, EventType: normalizeEventType(eventType), RunUID: runUID, Query: query,
+		PrinterID: printerID, EventType: eventType, RunUID: runUID, Query: query,
 		From: from, To: to, Before: before, BeforeID: beforeID, Limit: limit + 1,
 	})
 	if err != nil {
@@ -962,6 +992,35 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"revoked": true})
 }
 
+func (s *Server) handleEventTicket(w http.ResponseWriter, _ *http.Request) {
+	ticket, expires, err := s.auth.IssueEventTicket()
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"ticket": ticket, "expiresAt": expires})
+}
+
+func (s *Server) handleCreateEventCredential(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Label string `json:"label"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Code: "invalid_json", Error: err.Error()})
+		return
+	}
+	if len(body.Label) > 100 {
+		writeJSON(w, http.StatusBadRequest, errorResponse{Code: "invalid_request", Error: "label is too long"})
+		return
+	}
+	token, err := s.auth.CreateEventCredential(body.Label)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"token": token})
+}
+
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	allowed, err := s.configRepo.GetSetting(config.SettingAllowedOrigin)
 	if err != nil {
@@ -988,6 +1047,8 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.bus.Publish(events.Event{Type: events.ConfigChanged,
+		Metadata: map[string]any{"setting": "allowedPosOrigin", "restartRequired": false}})
 	writeJSON(w, http.StatusOK, map[string]string{"allowedOrigin": origin})
 }
 

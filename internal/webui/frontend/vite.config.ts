@@ -10,7 +10,7 @@ export default defineConfig({
     alias: { '@': new URL('./src', import.meta.url).pathname },
   },
   server: {
-    proxy: { '/api/v1': 'http://127.0.0.1:17432' },
+    proxy: { '/api/v2': 'http://127.0.0.1:17432' },
   },
   build: {
     outDir: '../dist',

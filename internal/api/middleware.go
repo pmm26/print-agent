@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/sha256"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -23,11 +24,22 @@ func isLocalOrigin(origin string) bool {
 		strings.HasPrefix(origin, "https://localhost:")
 }
 
+func IsLocalOrigin(origin string) bool { return isLocalOrigin(origin) }
+
+func isLoopbackRemote(remoteAddress string) bool {
+	host, _, err := net.SplitHostPort(remoteAddress)
+	if err != nil {
+		host = remoteAddress
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // posCORS gates the POS-facing endpoints:
 //   - No Origin header: a local non-browser client (curl, tests) — allowed.
 //   - Local origin: the embedded dashboard — allowed.
 //   - The configured POS origin: CORS headers set; bearer token enforced by
-//     requireAuth.
+//     the route-specific credential scope.
 //   - Anything else: rejected and audited.
 func (s *Server) posCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +47,7 @@ func (s *Server) posCORS(next http.Handler) http.Handler {
 		if origin != "" && !isLocalOrigin(origin) {
 			allowed, _ := s.configRepo.GetSetting("allowed_origin")
 			if allowed == "" || origin != allowed {
-				s.bus.Publish(events.Event{Type: events.AuthDenied,
+				s.bus.Publish(events.Event{Type: events.AuthDenied, PublishScope: events.ScopeLocal,
 					Message: fmt.Sprintf("origin %q rejected for %s %s", origin, r.Method, r.URL.Path)})
 				writeJSON(w, http.StatusForbidden, errorResponse{Code: "origin_forbidden", Error: "origin not allowed"})
 				return
@@ -59,27 +71,26 @@ func (s *Server) posCORS(next http.Handler) http.Handler {
 	})
 }
 
-// requireAuth enforces the bearer token on cross-origin POS requests. Local
-// callers (no Origin, or the loopback dashboard) are exempt: they already
-// have local access to the machine.
-func (s *Server) requireAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		origin := r.Header.Get("Origin")
-		if origin != "" && !isLocalOrigin(origin) {
-			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			valid, err := s.auth.validateToken(token, origin)
-			if err != nil {
-				s.log.Error("token validation persistence failed", "origin", origin, "error", err)
+func (s *Server) requireScope(scope string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			if !isLoopbackRemote(r.RemoteAddr) || (origin != "" && !isLocalOrigin(origin)) {
+				token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+				valid, err := s.auth.validateTokenScope(token, origin, scope)
+				if err != nil {
+					s.log.Error("token validation persistence failed", "origin", origin, "error", err)
+				}
+				if !valid {
+					s.bus.Publish(events.Event{Type: events.AuthDenied, PublishScope: events.ScopeLocal,
+						Message: fmt.Sprintf("invalid token from origin %q for %s %s", origin, r.Method, r.URL.Path)})
+					writeJSON(w, http.StatusUnauthorized, errorResponse{Code: "unauthorized", Error: "invalid or missing token"})
+					return
+				}
 			}
-			if !valid {
-				s.bus.Publish(events.Event{Type: events.AuthDenied,
-					Message: fmt.Sprintf("invalid token from origin %q for %s %s", origin, r.Method, r.URL.Path)})
-				writeJSON(w, http.StatusUnauthorized, errorResponse{Code: "unauthorized", Error: "invalid or missing token"})
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // localOnly rejects any cross-origin browser request. Management endpoints
@@ -87,8 +98,8 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 func (s *Server) localOnly(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin != "" && !isLocalOrigin(origin) {
-			s.bus.Publish(events.Event{Type: events.AuthDenied,
+		if !isLoopbackRemote(r.RemoteAddr) || (origin != "" && !isLocalOrigin(origin)) {
+			s.bus.Publish(events.Event{Type: events.AuthDenied, PublishScope: events.ScopeLocal,
 				Message: fmt.Sprintf("origin %q rejected for admin endpoint %s", origin, r.URL.Path)})
 			writeJSON(w, http.StatusForbidden, errorResponse{Code: "admin_origin_forbidden", Error: "forbidden"})
 			return

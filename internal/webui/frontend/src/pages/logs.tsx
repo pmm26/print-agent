@@ -17,7 +17,7 @@ import { ErrorState, LoadingState, PageHeader, StatusBadge, formatField } from '
 
 const inputClass = 'h-8 w-full rounded-lg border border-input bg-background px-2.5 text-sm outline-none focus:ring-2 focus:ring-ring/50'
 const levels = ['debug', 'info', 'warn', 'error'] as const
-const events = ['printer_connected', 'printer_disconnected', 'printer_reconnecting', 'printer_error', 'config_changed', 'print_run_queued', 'print_run_processing', 'print_run_transmitted', 'print_run_failed', 'print_run_uncertain', 'print_run_cancelled', 'print_run_resolved']
+const events = ['printer.connected', 'printer.disconnected', 'printer.reconnect_scheduled', 'printer.error', 'printer.configuration_changed', 'print_run.queued', 'print_run.claimed', 'print_run.transmission_started', 'print_run.transmitted', 'print_run.failed', 'print_run.uncertain', 'print_run.cancelled', 'print_run.confirmed_printed']
 
 function useSystemFeed(params: URLSearchParams) {
   const key = params.toString(); const [older, setOlder] = useState<SystemLogRecord[]>([]); const [cursor, setCursor] = useState('')

@@ -15,15 +15,17 @@ import (
 )
 
 func main() {
-	port := flag.Int("port", 17432, "loopback port to listen on")
+	port := flag.Int("port", 17432, "HTTP/WebSocket port to listen on")
+	bind := flag.String("bind", "", "bind IP (default from persisted settings; loopback initially)")
 	dataDir := flag.String("data-dir", "", "data directory (default: OS config dir /print-agent)")
 	console := flag.Bool("console", true, "log to stderr in addition to the log file")
 	flag.Parse()
 
 	svc, err := app.New(app.Options{
-		DataDir: *dataDir,
-		Port:    *port,
-		Console: *console,
+		DataDir:     *dataDir,
+		Port:        *port,
+		BindAddress: *bind,
+		Console:     *console,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

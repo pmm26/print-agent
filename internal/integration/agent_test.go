@@ -3,6 +3,7 @@ package integration
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -35,6 +36,7 @@ func (d *stubDriver) VerifyConnected(context.Context, config.PrinterConfig) erro
 
 type harness struct {
 	t       *testing.T
+	db      *sql.DB
 	repo    *jobs.Repository
 	service *jobs.Service
 	manager *printers.Manager
@@ -50,7 +52,7 @@ func newHarness(t *testing.T, printerIDs ...string) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	h := &harness{t: t, mocks: map[string]*transport.MockTransport{}, driver: &stubDriver{}}
+	h := &harness{t: t, db: db, mocks: map[string]*transport.MockTransport{}, driver: &stubDriver{}}
 	factory := func(cfg config.PrinterConfig) transport.Transport {
 		h.mu.Lock()
 		defer h.mu.Unlock()
@@ -70,7 +72,7 @@ func newHarness(t *testing.T, printerIDs ...string) *harness {
 			t.Fatal(err)
 		}
 	}
-	bus := events.NewBus()
+	bus := events.NewDiscardPublisher()
 	h.repo = jobs.NewRepository(db)
 	h.manager = printers.NewManager(configRepo, h.repo, h.driver, bus, factory)
 	h.service = jobs.NewService(h.repo, bus, h.manager, escpos.NewRenderer(), escpos.KnownTemplate)
@@ -141,7 +143,7 @@ func TestMultiplePrintersFulfillOneJob(t *testing.T) {
 	h.waitRun(initialRun(job, "cashier").UID, jobs.RunTransmitted, 4*time.Second)
 	h.waitRun(initialRun(job, "kitchen").UID, jobs.RunTransmitted, 4*time.Second)
 	detail, err := h.service.Get(job.UID, "local")
-	if err != nil || detail.State != "completed" || detail.FulfilledPrinterCount != 2 {
+	if err != nil || detail.State != "transmitted" || detail.FulfilledPrinterCount != 2 {
 		t.Fatalf("detail = %+v, %v", detail, err)
 	}
 }
@@ -244,6 +246,16 @@ func TestAmbiguousWriteNeverRetries(t *testing.T) {
 	}
 }
 
+func TestZeroCountWriteTimeoutIsUncertain(t *testing.T) {
+	h := newHarness(t, "kitchen")
+	h.mock("kitchen").FailNextWrite(transport.ErrWriteTimeout, 0)
+	job := h.submit("timeout-uncertain", "kitchen")
+	run := h.waitRun(initialRun(job, "kitchen").UID, jobs.RunUncertain, 4*time.Second)
+	if run.BytesAccepted != 0 || run.ErrorCode != "ambiguous_write" || run.Retryable {
+		t.Fatalf("timed-out Run = %+v", run)
+	}
+}
+
 func TestPostWriteLinkLossIsUncertain(t *testing.T) {
 	h := newHarness(t, "kitchen")
 	mock := h.mock("kitchen")
@@ -274,7 +286,7 @@ func TestManualReprintMarkerAndFulfillment(t *testing.T) {
 		t.Fatalf("reprint marker missing from %q", writes[len(writes)-1])
 	}
 	detail, _ := h.service.Get(job.UID, "local")
-	if detail.State != "completed" || !detail.HasManualReprints {
+	if detail.State != "transmitted" || !detail.HasManualReprints {
 		t.Fatalf("detail = %+v", detail)
 	}
 }
@@ -312,7 +324,7 @@ func TestProcessingRunCannotBeCancelled(t *testing.T) {
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		run, _ := h.repo.GetRun(runUID)
-		if run.Status == jobs.RunProcessing {
+		if run.Status == jobs.RunClaimed || run.Status == jobs.RunTransmitting {
 			if err := h.service.CancelRun(runUID); err == nil {
 				t.Fatal("processing Run was cancelled")
 			}
@@ -321,4 +333,84 @@ func TestProcessingRunCannotBeCancelled(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("Run never reached processing")
+}
+
+func TestShutdownDuringTransmissionBecomesUncertain(t *testing.T) {
+	h := newHarness(t, "kitchen")
+	mock := h.mock("kitchen")
+	mock.HangOnWrite = true
+	job := h.submit("shutdown-transmission", "kitchen")
+	runUID := initialRun(job, "kitchen").UID
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		run, _ := h.repo.GetRun(runUID)
+		if run.Status == jobs.RunTransmitting {
+			h.manager.Stop()
+			stored, err := h.repo.GetRun(runUID)
+			if err != nil || stored.Status != jobs.RunUncertain || stored.ErrorCode != "ambiguous_write" {
+				t.Fatalf("shutdown Run = %+v, %v", stored, err)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("Run never began transmission")
+}
+
+func TestDatabaseFailureBeforeClaimPreventsTransmission(t *testing.T) {
+	h := newHarness(t, "kitchen")
+	h.driver.linkDown.Store(true)
+	h.submit("database-before-claim", "kitchen")
+	// Closing SQLite simulates an unrecoverable outage for this process. The
+	// worker may reconnect, but it cannot claim the queued Run and therefore
+	// must not produce a physical side effect.
+	if err := h.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	h.driver.linkDown.Store(false)
+	if err := h.manager.Reconnect("kitchen"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if writes := h.mock("kitchen").Writes(); len(writes) != 0 {
+		t.Fatalf("printer received %d writes while SQLite was unavailable", len(writes))
+	}
+}
+
+func TestDatabaseFailureAfterWritePausesUntilOutcomeCanCommit(t *testing.T) {
+	h := newHarness(t, "kitchen")
+	if _, err := h.db.Exec(`CREATE TRIGGER reject_transmitted_state BEFORE UPDATE OF status ON print_runs
+		WHEN NEW.status = 'transmitted' BEGIN SELECT RAISE(ABORT, 'injected result persistence failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	written := make(chan struct{}, 1)
+	h.mock("kitchen").SetOnWrite(func([]byte) { written <- struct{}{} })
+	job := h.submit("database-after-write", "kitchen")
+	runUID := initialRun(job, "kitchen").UID
+	select {
+	case <-written:
+	case <-time.After(3 * time.Second):
+		t.Fatal("transport did not accept the payload")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		run, err := h.repo.GetRun(runUID)
+		if err == nil && run.Status == jobs.RunTransmitting && h.manager.PersistenceStatus().Paused {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !h.manager.PersistenceStatus().Paused {
+		t.Fatal("persistence gate did not pause after the outcome transaction failed")
+	}
+	if len(h.mock("kitchen").Writes()) != 1 {
+		t.Fatal("worker retransmitted while result persistence was unavailable")
+	}
+	if _, err := h.db.Exec(`DROP TRIGGER reject_transmitted_state`); err != nil {
+		t.Fatal(err)
+	}
+	h.waitRun(runUID, jobs.RunTransmitted, 3*time.Second)
+	if len(h.mock("kitchen").Writes()) != 1 {
+		t.Fatal("outcome recovery duplicated the physical transmission")
+	}
 }

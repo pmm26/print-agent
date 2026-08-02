@@ -1,6 +1,7 @@
 import type {
   AgentStatus, BluetoothDevices, Candidate, JobDetail, JobsPage, PairingCode,
   PrinterConfig, PrinterLogPage, PrinterQueue, PrinterStatus, SystemLogPage, TokenInfo,
+  WebSocketSettings,
 } from './types'
 
 export class APIError extends Error {
@@ -18,7 +19,7 @@ export class APIError extends Error {
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
-  const response = await fetch(`/api/v1${path}`, { ...init, headers })
+  const response = await fetch(`/api/v2${path}`, { ...init, headers })
   const body = response.status === 204 ? null : await response.json().catch(() => null) as null | { error?: string; code?: string }
   if (!response.ok) throw new APIError(body?.error || response.statusText, response.status, body?.code)
   return body as T
@@ -35,6 +36,7 @@ export const api = {
   tokens: (signal?: AbortSignal) => request<TokenInfo[]>('/admin/tokens', { signal }),
   pairingCode: () => request<PairingCode>('/admin/pairing-code', { method: 'POST' }),
   settings: (signal?: AbortSignal) => request<{ allowedOrigin: string }>('/admin/settings', { signal }),
+  websocketSettings: (signal?: AbortSignal) => request<WebSocketSettings>('/admin/websocket', { signal }),
   diagnostics: (signal?: AbortSignal) => request<Record<string, unknown>>('/diagnostics', { signal }),
   systemLogs: (params: URLSearchParams, signal?: AbortSignal) => request<SystemLogPage>(`/system-logs?${params}`, { signal }),
   printerLogs: (params: URLSearchParams, signal?: AbortSignal) => request<PrinterLogPage>(`/printer-logs?${params}`, { signal }),

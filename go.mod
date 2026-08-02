@@ -3,6 +3,7 @@ module print-agent
 go 1.26.5
 
 require (
+	github.com/coder/websocket v1.8.14
 	github.com/godbus/dbus/v5 v5.2.2
 	go.bug.st/serial v1.8.0
 	golang.org/x/sys v0.46.0

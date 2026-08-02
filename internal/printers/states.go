@@ -13,19 +13,29 @@ import (
 type ConnectionState string
 
 const (
-	StateDisabled     ConnectionState = "disabled"
-	StateDisconnected ConnectionState = "disconnected"
-	StateConnecting   ConnectionState = "connecting"
-	StateConnected    ConnectionState = "connected"
-	StatePrinting     ConnectionState = "printing"
-	StateReconnecting ConnectionState = "reconnecting"
-	StateError        ConnectionState = "error"
+	StateDisabled       ConnectionState = "disabled"
+	StateDisconnected   ConnectionState = "disconnected"
+	StateConnecting     ConnectionState = "connecting"
+	StateVerifying      ConnectionState = "verifying"
+	StateConnected      ConnectionState = "connected"
+	StateReconnectWait  ConnectionState = "reconnect_wait"
+	StateOperatorAction ConnectionState = "operator_action_required"
+	StateStopping       ConnectionState = "stopping"
+)
+
+type ActivityState string
+
+const (
+	ActivityIdle         ActivityState = "idle"
+	ActivityClaimed      ActivityState = "claimed"
+	ActivityTransmitting ActivityState = "transmitting"
 )
 
 // Status is a point-in-time snapshot of one printer for the API/dashboard.
 type Status struct {
 	Printer          config.PrinterConfig `json:"printer"`
 	State            ConnectionState      `json:"state"`
+	Activity         ActivityState        `json:"activity"`
 	Endpoint         string               `json:"endpoint"`
 	LastError        string               `json:"lastError,omitempty"`
 	LastTransmission *time.Time           `json:"lastTransmission,omitempty"`

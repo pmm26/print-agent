@@ -11,8 +11,8 @@ describe('Job reprint safety', () => {
   it('keeps one reprint request ID across an explicit retry', async () => {
     const bodies: Array<{ reprintRequestId: string }> = []; let calls = 0
     server.use(
-      http.get('/api/v1/jobs/job_1', () => HttpResponse.json({ uid: 'job_1', jobId: 'order-1', template: 'kitchen-ticket', data: { orderNumber: '1' }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), state: 'completed', fulfilledPrinterCount: 1, originalPrinterCount: 1, requiresAttention: false, hasUncertainResult: false, hasManualReprints: false, originalPrinters: [{ printerId: 'kitchen', fulfilled: true, runs: [] }] })),
-      http.post('/api/v1/jobs/job_1/reprint', async ({ request }) => { bodies.push(await request.json() as { reprintRequestId: string }); calls++; return calls === 1 ? HttpResponse.json({ error: 'temporary failure' }, { status: 503 }) : HttpResponse.json({ duplicate: false }) }),
+      http.get('/api/v2/jobs/job_1', () => HttpResponse.json({ uid: 'job_1', jobId: 'order-1', template: 'kitchen-ticket', data: { orderNumber: '1' }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), state: 'transmitted', fulfilledPrinterCount: 1, originalPrinterCount: 1, requiresAttention: false, hasUncertainResult: false, hasManualReprints: false, originalPrinters: [{ printerId: 'kitchen', fulfilled: true, runs: [] }] })),
+      http.post('/api/v2/jobs/job_1/reprint', async ({ request }) => { bodies.push(await request.json() as { reprintRequestId: string }); calls++; return calls === 1 ? HttpResponse.json({ error: 'temporary failure' }, { status: 503 }) : HttpResponse.json({ duplicate: false }) }),
     )
     renderApp(<JobDialogProvider><Opener /></JobDialogProvider>)
     await userEvent.click(screen.getByRole('button', { name: 'Open Job' }))

@@ -15,7 +15,7 @@ const selectClass = 'h-8 rounded-lg border border-input bg-background px-2.5 tex
 const ubuntuStopCommand = "pkill -f '^/usr/bin/gnome-control-center bluetooth$'"
 const normalizeAddress = (value?: string) => (value || '').trim().replaceAll('-', ':').toUpperCase()
 const endpointAddress = (endpoint?: string) => { const value = endpoint || ''; const index = value.indexOf('://'); return index >= 0 ? normalizeAddress(value.slice(index + 3)) : '' }
-const activeConnectionType = (status: PrinterStatus) => ['connected', 'printing'].includes(status.state) ? status.endpoint.split('://')[0] || 'unknown' : 'none'
+const activeConnectionType = (status: PrinterStatus) => status.state === 'connected' ? status.endpoint.split('://')[0] || 'unknown' : 'none'
 function configuredFor(device: BluetoothDevice, printers: PrinterStatus[]) {
   return printers.filter(status => {
     const printer = status.printer

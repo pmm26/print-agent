@@ -40,23 +40,24 @@ const (
 
 // PrinterConfig is the persisted configuration for one logical printer.
 type PrinterConfig struct {
-	ID                   string               `json:"id"`
-	DisplayName          string               `json:"displayName"`
-	Enabled              bool                 `json:"enabled"`
-	Transport            TransportKind        `json:"transport"`
-	DeviceAddress        string               `json:"deviceAddress,omitempty"`
-	Endpoint             string               `json:"endpoint"`
-	ConnectionPreference ConnectionPreference `json:"connectionPreference"`
-	BaudRate             int                  `json:"baudRate"`
-	DataBits             int                  `json:"dataBits"`
-	StopBits             int                  `json:"stopBits"`
-	Parity               string               `json:"parity"`
-	CharactersPerLine    int                  `json:"charactersPerLine"`
-	Encoding             string               `json:"encoding"`
-	AutoReconnect        bool                 `json:"autoReconnect"`
-	RetiredAt            *time.Time           `json:"retiredAt,omitempty"`
-	CreatedAt            time.Time            `json:"createdAt"`
-	UpdatedAt            time.Time            `json:"updatedAt"`
+	ID                      string               `json:"id"`
+	DisplayName             string               `json:"displayName"`
+	Enabled                 bool                 `json:"enabled"`
+	Transport               TransportKind        `json:"transport"`
+	DeviceAddress           string               `json:"deviceAddress,omitempty"`
+	Endpoint                string               `json:"endpoint"`
+	ConnectionPreference    ConnectionPreference `json:"connectionPreference"`
+	BaudRate                int                  `json:"baudRate"`
+	DataBits                int                  `json:"dataBits"`
+	StopBits                int                  `json:"stopBits"`
+	Parity                  string               `json:"parity"`
+	CharactersPerLine       int                  `json:"charactersPerLine"`
+	Encoding                string               `json:"encoding"`
+	AutoReconnect           bool                 `json:"autoReconnect"`
+	ConfigurationGeneration int                  `json:"configurationGeneration"`
+	RetiredAt               *time.Time           `json:"retiredAt,omitempty"`
+	CreatedAt               time.Time            `json:"createdAt"`
+	UpdatedAt               time.Time            `json:"updatedAt"`
 }
 
 var printerIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)

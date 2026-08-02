@@ -19,8 +19,8 @@ describe('Printer log navigation', () => {
   it('saves a manually entered endpoint without a stale discovered address', async () => {
     let payload: { endpoint?: string; deviceAddress?: string; connectionPreference?: string } = {}
     server.use(
-      http.get('/api/v1/bluetooth/candidates', () => HttpResponse.json([{ endpoint: 'COM8', deviceName: 'Kitchen printer', deviceAddress: 'AA:BB:CC:DD:EE:FF', connected: true, isPrinter: true }])),
-      http.post('/api/v1/printers', async ({ request }) => {
+      http.get('/api/v2/bluetooth/candidates', () => HttpResponse.json([{ endpoint: 'COM8', deviceName: 'Kitchen printer', deviceAddress: 'AA:BB:CC:DD:EE:FF', connected: true, isPrinter: true }])),
+      http.post('/api/v2/printers', async ({ request }) => {
         payload = await request.json() as typeof payload
         return HttpResponse.json(payload)
       }),

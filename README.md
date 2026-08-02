@@ -19,9 +19,8 @@ go run ./cmd/print-agent --port 17555 --data-dir /tmp/agent-data
 
 Data (SQLite DB, rolling logs) lives in the platform's user data directory by
 default. Structured application logs are available under **System → System
-Logs** and retained for two hours. Printer and Print Run events are available
-under **Operations → Printer Logs** and retained with the existing 48-hour Job
-history.
+Logs** and retained for two hours. Printer, Print Run, agent, and WebSocket
+events are stored in the durable event log for seven days by default.
 
 ## Hardware validation (btprobe)
 
@@ -101,7 +100,7 @@ stored by endpoint + MAC address; label them physically.
    installation):
 
 ```js
-const { token } = await (await fetch("http://127.0.0.1:17432/api/v1/pair", {
+const { token } = await (await fetch("http://127.0.0.1:17432/api/v2/pair", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ code: userEnteredCode }),
@@ -112,7 +111,7 @@ const { token } = await (await fetch("http://127.0.0.1:17432/api/v1/pair", {
    or more original printers:
 
 ```js
-await fetch("http://127.0.0.1:17432/api/v1/jobs", {
+await fetch("http://127.0.0.1:17432/api/v2/jobs", {
   method: "POST",
   headers: {
     "Content-Type": "application/json",
@@ -136,14 +135,14 @@ The idempotency identity is `jobId + template`:
 - Changed order data must use a new `jobId`.
 - Printer ordering does not affect equality.
 
-Completed Job data is retained for 48 hours. After it is purged, the same
-`jobId + template` can be accepted and printed again by design.
+Resolved Job data is retained for 48 hours. After it is purged, the same
+`jobId + template` can be accepted and queued again by design.
 
-Read one Job with `GET /api/v1/jobs/{uid}` or find related Jobs with
-`GET /api/v1/jobs?jobId=order-1256`. Print Runs use
-`GET /api/v1/print-runs/{uid}`.
+Read one Job with `GET /api/v2/jobs/{uid}` or find related Jobs with
+`GET /api/v2/jobs?jobId=order-1256`. Print Runs use
+`GET /api/v2/print-runs/{uid}`.
 
-A selected or whole-Job reprint uses `POST /api/v1/jobs/{uid}/reprint`:
+A selected or whole-Job reprint uses `POST /api/v2/jobs/{uid}/reprint`:
 
 ```json
 {
@@ -179,9 +178,12 @@ reprints. These actions use the real queue and can produce physical output.
 
 ## Print Run states
 
-`queued → processing → transmitted` — *transmitted* means all bytes reached
-the OS/Bluetooth link, not that paper came out (cheap printers give no
-acknowledgement). Failures classify as:
+`queued → claimed → transmitting → transmitted` is the normal attempt path.
+The `transmitting` transition commits before the first byte write.
+*Transmitted* means the complete payload was accepted by the OS/Bluetooth
+transport and the link still verified afterward; it does **not** mean paper
+physically came out. Cheap ESC/POS printers provide no authoritative print
+acknowledgement. Failures classify as:
 
 - A printer that is offline leaves its existing Run queued; connection attempts
   are not Print Runs.
@@ -194,15 +196,47 @@ acknowledgement). Failures classify as:
   auto-retried. An operator must explicitly choose **It printed** or request a
   marked reprint.
 
-On startup, Print Runs stuck in `processing` become `uncertain` (the agent
-may have died mid-write). Queued Jobs survive restarts — SQLite is the queue.
+On startup, a Run stuck in `claimed` becomes a retry-eligible, known-not-sent
+failure; a Run stuck in `transmitting` becomes `uncertain`. Queued Jobs survive
+restarts — SQLite is the queue. Every retry is a new immutable attempt linked
+through `chainUid`, `attemptNumber`, and `previousPrintRunUid`.
 If a Print Run state write to SQLite fails, all workers pause new claims and
-retry persistence indefinitely. `/api/v1/status` and the dashboard expose this
+retry persistence indefinitely. `/api/v2/status` and the dashboard expose this
 pause; printing resumes automatically after the database recovers.
 
-Terminal/resolved Jobs and events are retained for 48 hours. Queued,
-processing, retry-pending, and unresolved failed/uncertain work is never
-purged.
+Terminal/resolved Jobs are retained for 48 hours. Queued, claimed,
+transmitting, retry-pending, and unresolved failed/uncertain work is never
+purged. Event retention and outbound offline buffering default to seven days.
+
+## Real-time events
+
+The versioned event stream uses WebSocket subprotocol
+`print-agent.events.v1` and endpoint `/api/v2/events/ws`. Modes are
+`disabled`, `server`, `client`, and `both`; the default is disabled. Server
+mode shares the HTTP listener, which remains loopback-only. Change settings
+through `GET/PUT /api/v2/admin/websocket`, then restart the agent.
+
+Server consumers authenticate with an `events:read` credential created once
+through `POST /api/v2/admin/event-credentials`. The embedded browser may
+instead exchange local access for a one-use 30-second ticket at
+`POST /api/v2/events/ticket`. New connections receive a state snapshot. To
+replay, reconnect with `?cursor=<last-sequence>`; an expired cursor receives a
+`resync_required` frame and must fetch a new snapshot. Delivery is replayable
+at least once, so consumers must deduplicate by `eventId` or `sequence`.
+
+Client mode connects only for outbound reporting. Configure a `ws://` or
+`wss://` destination and an `env:VARIABLE` or `file:/owner-only/path` secret
+reference; clear credentials are never stored in SQLite or returned by the
+API. Each outbound event remains pending until the peer returns:
+
+```json
+{"type":"ack","eventId":"evt_...","sequence":123}
+```
+
+Acknowledgement timeout or disconnect causes redelivery and therefore possible
+duplicates. After ten failed attempts, buffer exhaustion, or the configured
+offline-duration limit, the delivery is moved to `dead_letter_events`. There
+is no inbound remote-printing or remote-management command channel.
 
 ## Local data and pre-release upgrades
 
@@ -212,10 +246,23 @@ should be treated as sensitive local data. Authentication protects the POS
 browser boundary; management endpoints intentionally trust local machine
 access and are not a defense against another process running as the user.
 
-This project is pre-release. The Job/Print Run schema is a destructive rebuild
-baseline; old pre-release databases are not migrated. Stop the agent, delete
-or relocate its data directory, restart it, and configure printers and POS
-pairing again. The agent never silently deletes an old database itself.
+This project is pre-release. The schema is a destructive rebuild baseline; old
+pre-release databases and credentials are not migrated. To reset safely:
+
+1. Stop the agent and verify the process has exited.
+2. Move the entire data directory to a specifically named backup (or delete it
+   only after confirming the exact path). Do not delete a home or workspace
+   root.
+3. Restart the agent. It creates the final schema and a new stable agent ID.
+4. Reconfigure printers, origins, credentials, and WebSocket destinations.
+5. Submit a test Job with a new `jobId`; do not copy queued Runs from the old
+   database.
+
+The agent never silently resets an incompatible database. Old receipt data and
+tokens remain sensitive even in a backup. The recoverable helper
+`scripts/reset-development-data.sh /absolute/data/path` performs step 2 only
+after checking for a specifically targeted directory containing
+`print-agent.db`.
 Applied migrations are checksummed and startup runs SQLite `quick_check`.
 
 ## Development
@@ -238,7 +285,7 @@ testing Go code from a clean checkout.
 ```sh
 cd internal/webui/frontend
 npm ci
-npm run dev      # Vite dev server; proxies /api/v1 to the running agent
+npm run dev      # Vite dev server; proxies /api/v2 to the running agent
 npm run check    # typecheck, lint, unit tests, and production build
 ```
 
@@ -248,9 +295,11 @@ builds the dashboard before compiling the embedded Go application.
 Architecture (one worker per printer with a process-wide transmission permit):
 
 ```
-HTTP handler → JobService → SQLite tx → wake channel → printer worker
-                                          worker: acquire permit → claim → render ESC/POS
-                                                  → write + verify → persist → release
+HTTP handler → JobService → SQLite business tx + durable event → printer worker
+                               ↓                                 claim → render
+                         event sequence                    persist transmitting
+                               ↓                                 write + verify
+                    WS replay / durable outbox              persist outcome
 ```
 
 Connections and reconnects remain independent, but at most one ESC/POS print

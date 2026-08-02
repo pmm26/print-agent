@@ -14,8 +14,8 @@ describe('Bluetooth pairing', () => {
     let capturedPIN = ''
     let capturedConnectionType = ''
     server.use(
-      http.get('/api/v1/bluetooth/devices', () => HttpResponse.json({ supported: true, devices: [{ name: 'Kitchen printer', address: '5A:4A:95:56:6F:B6', paired: false, connected: false, isPrinter: true }] })),
-      http.post('/api/v1/bluetooth/devices/:address/pair', async ({ params, request }) => {
+      http.get('/api/v2/bluetooth/devices', () => HttpResponse.json({ supported: true, devices: [{ name: 'Kitchen printer', address: '5A:4A:95:56:6F:B6', paired: false, connected: false, isPrinter: true }] })),
+      http.post('/api/v2/bluetooth/devices/:address/pair', async ({ params, request }) => {
         capturedAddress = String(params.address)
         const body = await request.json() as { pin: string; connectionType: string }
         capturedPIN = String(body.pin)
@@ -36,7 +36,7 @@ describe('Bluetooth pairing', () => {
 
   it('passes the selected connection type to discovery', async () => {
     let capturedConnectionType = ''
-    server.use(http.post('/api/v1/bluetooth/discovery/start', ({ request }) => {
+    server.use(http.post('/api/v2/bluetooth/discovery/start', ({ request }) => {
       capturedConnectionType = new URL(request.url).searchParams.get('connectionType') || ''
       return HttpResponse.json({ scanning: true })
     }))
@@ -49,7 +49,7 @@ describe('Bluetooth pairing', () => {
   })
 
   it('opens the printer editor when in-app discovery is unavailable', async () => {
-    server.use(http.get('/api/v1/bluetooth/devices', () => HttpResponse.json({ supported: false, devices: [] })))
+    server.use(http.get('/api/v2/bluetooth/devices', () => HttpResponse.json({ supported: false, devices: [] })))
     renderApp(<Routes><Route element={<AppShell />}><Route path="setup/pair" element={<PairDevicesPage />} /><Route path="setup/printers" element={<PrintersPage />} /></Route></Routes>, '/setup/pair')
 
     await userEvent.click(await screen.findByRole('button', { name: 'Add printer' }))

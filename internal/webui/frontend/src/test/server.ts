@@ -7,21 +7,21 @@ const status = {
 }
 
 export const handlers = [
-  http.get('/api/v1/status', () => HttpResponse.json(status)),
-  http.get('/api/v1/jobs', () => HttpResponse.json({ jobs: [], nextCursor: '' })),
-  http.get('/api/v1/bluetooth/devices', () => HttpResponse.json({ supported: true, devices: [] })),
-  http.get('/api/v1/bluetooth/candidates', () => HttpResponse.json([])),
-  http.post('/api/v1/bluetooth/discovery/start', () => HttpResponse.json({ scanning: true })),
-  http.post('/api/v1/bluetooth/discovery/stop', () => HttpResponse.json({ scanning: false })),
-  http.get('/api/v1/admin/settings', () => HttpResponse.json({ allowedOrigin: 'https://pos.example.test' })),
-  http.get('/api/v1/admin/tokens', () => HttpResponse.json([])),
-  http.get('/api/v1/printers/:printerId/queue', () => HttpResponse.json({ printer: status.printers[0], processingRun: null, queuedRuns: [], retryPendingRuns: [], attentionRuns: [], recentTransmittedRuns: [] })),
-  http.get('/api/v1/system-logs', ({ request }) => {
+  http.get('/api/v2/status', () => HttpResponse.json(status)),
+  http.get('/api/v2/jobs', () => HttpResponse.json({ jobs: [], nextCursor: '' })),
+  http.get('/api/v2/bluetooth/devices', () => HttpResponse.json({ supported: true, devices: [] })),
+  http.get('/api/v2/bluetooth/candidates', () => HttpResponse.json([])),
+  http.post('/api/v2/bluetooth/discovery/start', () => HttpResponse.json({ scanning: true })),
+  http.post('/api/v2/bluetooth/discovery/stop', () => HttpResponse.json({ scanning: false })),
+  http.get('/api/v2/admin/settings', () => HttpResponse.json({ allowedOrigin: 'https://pos.example.test' })),
+  http.get('/api/v2/admin/tokens', () => HttpResponse.json([])),
+  http.get('/api/v2/printers/:printerId/queue', () => HttpResponse.json({ printer: status.printers[0], activeRun: null, queuedRuns: [], retryPendingRuns: [], attentionRuns: [], recentTransmittedRuns: [] })),
+  http.get('/api/v2/system-logs', ({ request }) => {
     const cursor = new URL(request.url).searchParams.get('cursor')
     return HttpResponse.json(cursor ? { logs: [{ id: 1, createdAt: new Date().toISOString(), level: 'warn', message: 'older timeout', attributes: {} }], nextCursor: '', retentionSeconds: 7200 } : { logs: [{ id: 2, createdAt: new Date().toISOString(), level: 'error', message: 'latest timeout', printerId: 'kitchen', attributes: { path: '/print' } }], nextCursor: 'older-cursor', retentionSeconds: 7200 })
   }),
-  http.get('/api/v1/printer-logs', () => HttpResponse.json({ events: [], nextCursor: '', retentionSeconds: 172800 })),
-  http.get('/api/v1/diagnostics', () => HttpResponse.json({ report: { databaseOk: true } })),
+  http.get('/api/v2/printer-logs', () => HttpResponse.json({ events: [], nextCursor: '', retentionSeconds: 172800 })),
+  http.get('/api/v2/diagnostics', () => HttpResponse.json({ report: { databaseOk: true } })),
 ]
 
 export const server = setupServer(...handlers)

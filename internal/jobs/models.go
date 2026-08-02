@@ -12,12 +12,13 @@ import (
 type PrintRunStatus string
 
 const (
-	RunQueued      PrintRunStatus = "queued"
-	RunProcessing  PrintRunStatus = "processing"
-	RunTransmitted PrintRunStatus = "transmitted"
-	RunFailed      PrintRunStatus = "failed"
-	RunUncertain   PrintRunStatus = "uncertain"
-	RunCancelled   PrintRunStatus = "cancelled"
+	RunQueued       PrintRunStatus = "queued"
+	RunClaimed      PrintRunStatus = "claimed"
+	RunTransmitting PrintRunStatus = "transmitting"
+	RunTransmitted  PrintRunStatus = "transmitted"
+	RunFailed       PrintRunStatus = "failed"
+	RunUncertain    PrintRunStatus = "uncertain"
+	RunCancelled    PrintRunStatus = "cancelled"
 )
 
 func (s PrintRunStatus) Terminal() bool {
@@ -26,7 +27,7 @@ func (s PrintRunStatus) Terminal() bool {
 
 func ValidPrintRunStatus(s PrintRunStatus) bool {
 	switch s {
-	case RunQueued, RunProcessing, RunTransmitted, RunFailed, RunUncertain, RunCancelled:
+	case RunQueued, RunClaimed, RunTransmitting, RunTransmitted, RunFailed, RunUncertain, RunCancelled:
 		return true
 	}
 	return false
@@ -52,6 +53,16 @@ type RunResolution string
 const (
 	ResolutionConfirmedPrinted RunResolution = "confirmed_printed"
 	ResolutionReprintRequested RunResolution = "reprint_requested"
+)
+
+type RetryDisposition string
+
+const (
+	RetryNone             RetryDisposition = "none"
+	RetryPendingReconnect RetryDisposition = "pending_reconnect"
+	RetryCreated          RetryDisposition = "created"
+	RetryExhausted        RetryDisposition = "exhausted"
+	RetrySuppressed       RetryDisposition = "suppressed"
 )
 
 type Job struct {
@@ -80,29 +91,33 @@ type JobPrinter struct {
 }
 
 type PrintRun struct {
-	QueueSequence       int64           `json:"-"`
-	UID                 string          `json:"uid"`
-	JobUID              string          `json:"jobUid"`
-	PrinterID           string          `json:"printerId"`
-	RunNumber           int             `json:"runNumber"`
-	Trigger             PrintRunTrigger `json:"trigger"`
-	ContentMode         ContentMode     `json:"-"`
-	PreviousRunUID      string          `json:"previousRunUid,omitempty"`
-	ReprintOfRunUID     string          `json:"reprintOfRunUid,omitempty"`
-	ReprintRequestID    string          `json:"reprintRequestId,omitempty"`
-	ReprintReason       string          `json:"reprintReason,omitempty"`
-	ExpectedContentHash string          `json:"contentHash"`
-	Status              PrintRunStatus  `json:"status"`
-	Retryable           bool            `json:"retryPending,omitempty"`
-	Resolution          RunResolution   `json:"resolution,omitempty"`
-	ErrorCode           string          `json:"errorCode,omitempty"`
-	ErrorMessage        string          `json:"errorMessage,omitempty"`
-	BytesAccepted       int             `json:"bytesAccepted"`
-	CreatedAt           time.Time       `json:"createdAt"`
-	StartedAt           *time.Time      `json:"startedAt,omitempty"`
-	FinishedAt          *time.Time      `json:"finishedAt,omitempty"`
-	TransmittedAt       *time.Time      `json:"transmittedAt,omitempty"`
-	ResolvedAt          *time.Time      `json:"resolvedAt,omitempty"`
+	QueueSequence         int64            `json:"-"`
+	UID                   string           `json:"uid"`
+	JobUID                string           `json:"jobUid"`
+	PrinterID             string           `json:"printerId"`
+	ChainUID              string           `json:"chainUid"`
+	RunNumber             int              `json:"runNumber"`
+	AttemptNumber         int              `json:"attemptNumber"`
+	Trigger               PrintRunTrigger  `json:"trigger"`
+	ContentMode           ContentMode      `json:"-"`
+	PreviousRunUID        string           `json:"previousRunUid,omitempty"`
+	ReprintOfRunUID       string           `json:"reprintOfRunUid,omitempty"`
+	ReprintRequestID      string           `json:"reprintRequestId,omitempty"`
+	ReprintReason         string           `json:"reprintReason,omitempty"`
+	ExpectedContentHash   string           `json:"contentHash"`
+	Status                PrintRunStatus   `json:"status"`
+	RetryDisposition      RetryDisposition `json:"retryDisposition"`
+	Retryable             bool             `json:"retryPending,omitempty"` // derived for compact status views
+	Resolution            RunResolution    `json:"resolution,omitempty"`
+	ErrorCode             string           `json:"errorCode,omitempty"`
+	ErrorMessage          string           `json:"errorMessage,omitempty"`
+	BytesAccepted         int              `json:"bytesAccepted"`
+	CreatedAt             time.Time        `json:"createdAt"`
+	ClaimedAt             *time.Time       `json:"claimedAt,omitempty"`
+	TransmissionStartedAt *time.Time       `json:"transmissionStartedAt,omitempty"`
+	FinishedAt            *time.Time       `json:"finishedAt,omitempty"`
+	TransmittedAt         *time.Time       `json:"transmittedAt,omitempty"`
+	ResolvedAt            *time.Time       `json:"resolvedAt,omitempty"`
 }
 
 type PrinterFulfillment struct {
@@ -118,7 +133,7 @@ type PrinterFulfillment struct {
 type JobDetail struct {
 	Job
 	UpdatedAt                      time.Time            `json:"updatedAt"`
-	CompletedAt                    *time.Time           `json:"completedAt,omitempty"`
+	ResolvedAt                     *time.Time           `json:"resolvedAt,omitempty"`
 	State                          string               `json:"state"`
 	FulfilledPrinterCount          int                  `json:"fulfilledPrinterCount"`
 	OriginalPrinterCount           int                  `json:"originalPrinterCount"`
@@ -137,7 +152,7 @@ type JobListItem struct {
 	Template                       string     `json:"template"`
 	CreatedAt                      time.Time  `json:"createdAt"`
 	UpdatedAt                      time.Time  `json:"updatedAt"`
-	CompletedAt                    *time.Time `json:"completedAt,omitempty"`
+	ResolvedAt                     *time.Time `json:"resolvedAt,omitempty"`
 	State                          string     `json:"state"`
 	FulfilledPrinterCount          int        `json:"fulfilledPrinterCount"`
 	OriginalPrinterCount           int        `json:"originalPrinterCount"`
@@ -173,7 +188,7 @@ func DeriveJob(job Job, printers []JobPrinter, runs []PrintRun) JobDetail {
 		}
 		for i := range printerRuns {
 			run := printerRuns[i]
-			for _, stamp := range []*time.Time{&run.CreatedAt, run.StartedAt, run.FinishedAt, run.ResolvedAt} {
+			for _, stamp := range []*time.Time{&run.CreatedAt, run.ClaimedAt, run.TransmissionStartedAt, run.FinishedAt, run.ResolvedAt} {
 				if stamp != nil && stamp.After(detail.UpdatedAt) {
 					detail.UpdatedAt = *stamp
 				}
@@ -197,10 +212,10 @@ func DeriveJob(job Job, printers []JobPrinter, runs []PrintRun) JobDetail {
 			if run.Trigger == TriggerManualReprint {
 				detail.HasManualReprints = true
 			}
-			if run.Status == RunFailed && run.Retryable && run.Resolution == "" {
+			if run.Status == RunFailed && run.RetryDisposition == RetryPendingReconnect && run.Resolution == "" {
 				p.RetryPending = true
 			}
-			if run.ContentMode == ContentReprint && (run.Status == RunFailed || run.Status == RunUncertain) && run.Resolution == "" && !run.Retryable {
+			if run.ContentMode == ContentReprint && (run.Status == RunFailed || run.Status == RunUncertain) && run.Resolution == "" && run.RetryDisposition != RetryPendingReconnect {
 				detail.ManualReprintRequiresAttention = true
 			}
 		}
@@ -213,12 +228,12 @@ func DeriveJob(job Job, printers []JobPrinter, runs []PrintRun) JobDetail {
 			allUnfulfilledCancelled = allUnfulfilledCancelled && p.Cancelled
 			for _, run := range printerRuns {
 				switch run.Status {
-				case RunProcessing:
+				case RunClaimed, RunTransmitting:
 					anyUnfulfilledProcessing = true
 				case RunQueued:
 					anyUnfulfilledQueued = true
 				case RunFailed:
-					if run.Retryable && run.Resolution == "" {
+					if run.RetryDisposition == RetryPendingReconnect && run.Resolution == "" {
 						anyUnfulfilledQueued = true
 					} else if run.Resolution == "" && !p.Cancelled {
 						anyUnfulfilledAttention = true
@@ -237,21 +252,21 @@ func DeriveJob(job Job, printers []JobPrinter, runs []PrintRun) JobDetail {
 	detail.RequiresAttention = anyUnfulfilledAttention || detail.ManualReprintRequiresAttention
 	switch {
 	case detail.OriginalPrinterCount > 0 && detail.FulfilledPrinterCount == detail.OriginalPrinterCount:
-		detail.State = "completed"
+		detail.State = "transmitted"
 		for i := range targetFulfilledTimes {
-			if detail.CompletedAt == nil || targetFulfilledTimes[i].After(*detail.CompletedAt) {
+			if detail.ResolvedAt == nil || targetFulfilledTimes[i].After(*detail.ResolvedAt) {
 				stamp := targetFulfilledTimes[i]
-				detail.CompletedAt = &stamp
+				detail.ResolvedAt = &stamp
 			}
 		}
 	case anyUnfulfilledProcessing:
-		detail.State = "printing"
+		detail.State = "transmitting"
 	case anyUnfulfilledQueued:
 		detail.State = "queued"
 	case anyUnfulfilledAttention:
 		detail.State = "attention_required"
 	case detail.FulfilledPrinterCount > 0 && allUnfulfilledCancelled:
-		detail.State = "partially_completed"
+		detail.State = "partially_transmitted"
 	case detail.FulfilledPrinterCount == 0 && allUnfulfilledCancelled:
 		detail.State = "cancelled"
 	default:
@@ -264,7 +279,7 @@ func DeriveJob(job Job, printers []JobPrinter, runs []PrintRun) JobDetail {
 func (d JobDetail) ListItem() JobListItem {
 	return JobListItem{
 		UID: d.UID, JobID: d.JobID, Template: d.Template, CreatedAt: d.CreatedAt,
-		UpdatedAt: d.UpdatedAt, CompletedAt: d.CompletedAt,
+		UpdatedAt: d.UpdatedAt, ResolvedAt: d.ResolvedAt,
 		State: d.State, FulfilledPrinterCount: d.FulfilledPrinterCount,
 		OriginalPrinterCount: d.OriginalPrinterCount, PartiallyFulfilled: d.PartiallyFulfilled,
 		RequiresAttention: d.RequiresAttention, HasUncertainResult: d.HasUncertainResult,

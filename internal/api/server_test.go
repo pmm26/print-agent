@@ -75,15 +75,21 @@ func newTestServerWithDriver(t *testing.T, driver platform.Driver, logger *slog.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	bus := events.NewBus()
+	bus := events.NewDiscardPublisher()
+	eventStore, err := events.NewStore(db)
+	if err != nil {
+		t.Fatal(err)
+	}
 	configRepo := config.NewRepository(db)
-	configRepo.SetSetting(config.SettingAllowedOrigin, posOrigin)
+	if err := configRepo.SetSetting(config.SettingAllowedOrigin, posOrigin); err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.PrinterConfig{ID: "cashier", Enabled: false, Transport: config.TransportMock, Endpoint: "mock://c"}
 	cfg.ApplyDefaults()
 	if err := configRepo.SavePrinter(cfg); err != nil {
 		t.Fatal(err)
 	}
-	repo := jobs.NewRepository(db)
+	repo := jobs.NewRepository(db, eventStore)
 	manager := printers.NewManager(configRepo, repo, driver, bus, nil)
 	svc := jobs.NewService(repo, bus, manager, escpos.NewRenderer(), escpos.KnownTemplate)
 	svc.SetWaker(manager)
@@ -103,7 +109,7 @@ func TestPairBluetoothDeviceReturnsTruthfulReadyDevice(t *testing.T) {
 		IsPrinter: true, Endpoint: "ble://5A:4A:95:56:6F:B6",
 	}}
 	ts, _, _, _ := newTestServerWithDriver(t, driver, slog.New(slog.DiscardHandler))
-	resp := request(t, http.MethodPost, ts.URL+"/api/v1/bluetooth/devices/5A%3A4A%3A95%3A56%3A6F%3AB6/pair", `{"pin":"0000"}`, nil)
+	resp := request(t, http.MethodPost, ts.URL+"/api/v2/bluetooth/devices/5A%3A4A%3A95%3A56%3A6F%3AB6/pair", `{"pin":"0000"}`, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
@@ -126,11 +132,11 @@ func TestBluetoothDisconnectAndForgetManagement(t *testing.T) {
 	driver := &pairingStubDriver{}
 	ts, _, _, _ := newTestServerWithDriver(t, driver, slog.New(slog.DiscardHandler))
 	address := "5A%3A4A%3A95%3A56%3A6F%3AB6"
-	resp := request(t, http.MethodPost, ts.URL+"/api/v1/bluetooth/devices/"+address+"/disconnect", ``, nil)
+	resp := request(t, http.MethodPost, ts.URL+"/api/v2/bluetooth/devices/"+address+"/disconnect", ``, nil)
 	if resp.StatusCode != http.StatusOK || driver.disconnected != "5A:4A:95:56:6F:B6" {
 		t.Fatalf("disconnect = %d %q", resp.StatusCode, driver.disconnected)
 	}
-	resp = request(t, http.MethodDelete, ts.URL+"/api/v1/bluetooth/devices/"+address, ``, nil)
+	resp = request(t, http.MethodDelete, ts.URL+"/api/v2/bluetooth/devices/"+address, ``, nil)
 	if resp.StatusCode != http.StatusOK || driver.forgotten != "5A:4A:95:56:6F:B6" {
 		t.Fatalf("forget = %d %q", resp.StatusCode, driver.forgotten)
 	}
@@ -139,12 +145,12 @@ func TestBluetoothDisconnectAndForgetManagement(t *testing.T) {
 func TestForgetConfiguredBluetoothDeviceIsBlocked(t *testing.T) {
 	driver := &pairingStubDriver{}
 	ts, _, _, _ := newTestServerWithDriver(t, driver, slog.New(slog.DiscardHandler))
-	resp := request(t, http.MethodPut, ts.URL+"/api/v1/printers/cashier",
+	resp := request(t, http.MethodPut, ts.URL+"/api/v2/printers/cashier",
 		`{"deviceAddress":"5A:4A:95:56:6F:B6","endpoint":"ble://5A:4A:95:56:6F:B6"}`, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("update status = %d", resp.StatusCode)
 	}
-	resp = request(t, http.MethodDelete, ts.URL+"/api/v1/bluetooth/devices/5A%3A4A%3A95%3A56%3A6F%3AB6", ``, nil)
+	resp = request(t, http.MethodDelete, ts.URL+"/api/v2/bluetooth/devices/5A%3A4A%3A95%3A56%3A6F%3AB6", ``, nil)
 	if resp.StatusCode != http.StatusConflict || driver.forgotten != "" {
 		t.Fatalf("forget = %d %q", resp.StatusCode, driver.forgotten)
 	}
@@ -171,7 +177,7 @@ func TestPairBluetoothDeviceMapsOperationalErrors(t *testing.T) {
 			driver := &pairingStubDriver{pairErr: tt.err}
 			ts, _, _, _ := newTestServerWithDriver(t, driver,
 				slog.New(slog.NewJSONHandler(&log, nil)))
-			resp := request(t, http.MethodPost, ts.URL+"/api/v1/bluetooth/devices/AA%3ABB%3ACC%3ADD%3AEE%3AFF/pair", `{}`, nil)
+			resp := request(t, http.MethodPost, ts.URL+"/api/v2/bluetooth/devices/AA%3ABB%3ACC%3ADD%3AEE%3AFF/pair", `{}`, nil)
 			if resp.StatusCode != tt.status {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, tt.status)
 			}
@@ -245,7 +251,7 @@ func request(t *testing.T, method, url, body string, headers map[string]string) 
 
 func TestCompositeSubmissionAndLookup(t *testing.T) {
 	ts, _, _, _ := newTestServer(t)
-	resp := request(t, http.MethodPost, ts.URL+"/api/v1/jobs", jobBody, nil)
+	resp := request(t, http.MethodPost, ts.URL+"/api/v2/jobs", jobBody, nil)
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("create status = %d", resp.StatusCode)
 	}
@@ -254,7 +260,7 @@ func TestCompositeSubmissionAndLookup(t *testing.T) {
 	if first.UID == "" || len(first.OriginalPrinters) != 1 {
 		t.Fatalf("first = %+v", first)
 	}
-	resp = request(t, http.MethodPost, ts.URL+"/api/v1/jobs", jobBody, nil)
+	resp = request(t, http.MethodPost, ts.URL+"/api/v2/jobs", jobBody, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("duplicate status = %d", resp.StatusCode)
 	}
@@ -263,11 +269,11 @@ func TestCompositeSubmissionAndLookup(t *testing.T) {
 	if !duplicate.Duplicate || duplicate.UID != first.UID {
 		t.Fatalf("duplicate = %+v", duplicate)
 	}
-	resp = request(t, http.MethodGet, ts.URL+"/api/v1/jobs/"+first.UID, "", nil)
+	resp = request(t, http.MethodGet, ts.URL+"/api/v2/jobs/"+first.UID, "", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("get status = %d", resp.StatusCode)
 	}
-	resp = request(t, http.MethodGet, ts.URL+"/api/v1/jobs?jobId=o1", "", nil)
+	resp = request(t, http.MethodGet, ts.URL+"/api/v2/jobs?jobId=o1", "", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("list status = %d", resp.StatusCode)
 	}
@@ -275,9 +281,9 @@ func TestCompositeSubmissionAndLookup(t *testing.T) {
 
 func TestConflictingSubmissionIs409(t *testing.T) {
 	ts, _, _, _ := newTestServer(t)
-	request(t, http.MethodPost, ts.URL+"/api/v1/jobs", jobBody, nil)
+	request(t, http.MethodPost, ts.URL+"/api/v2/jobs", jobBody, nil)
 	changed := `{"jobId":"o1","template":"test-page","data":{"line":"changed"},"printerIds":["cashier"]}`
-	resp := request(t, http.MethodPost, ts.URL+"/api/v1/jobs", changed, nil)
+	resp := request(t, http.MethodPost, ts.URL+"/api/v2/jobs", changed, nil)
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
@@ -290,17 +296,17 @@ func TestConflictingSubmissionIs409(t *testing.T) {
 
 func TestAllowedOriginRequiresToken(t *testing.T) {
 	ts, auth, _, _ := newTestServer(t)
-	resp := request(t, http.MethodPost, ts.URL+"/api/v1/jobs", jobBody, map[string]string{"Origin": posOrigin})
+	resp := request(t, http.MethodPost, ts.URL+"/api/v2/jobs", jobBody, map[string]string{"Origin": posOrigin})
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 	code, _, _ := auth.GeneratePairingCode()
-	pair := request(t, http.MethodPost, ts.URL+"/api/v1/pair", `{"code":"`+code+`"}`, map[string]string{"Origin": posOrigin})
+	pair := request(t, http.MethodPost, ts.URL+"/api/v2/pair", `{"code":"`+code+`"}`, map[string]string{"Origin": posOrigin})
 	var token struct {
 		Token string `json:"token"`
 	}
 	json.NewDecoder(pair.Body).Decode(&token)
-	resp = request(t, http.MethodPost, ts.URL+"/api/v1/jobs", jobBody, map[string]string{
+	resp = request(t, http.MethodPost, ts.URL+"/api/v2/jobs", jobBody, map[string]string{
 		"Origin": posOrigin, "Authorization": "Bearer " + token.Token,
 	})
 	if resp.StatusCode != http.StatusAccepted {
@@ -308,13 +314,38 @@ func TestAllowedOriginRequiresToken(t *testing.T) {
 	}
 }
 
+func TestEventCredentialsAreScopedAndTicketsAreOneUse(t *testing.T) {
+	ts, auth, _, _ := newTestServer(t)
+	defer ts.Close()
+	token, err := auth.CreateEventCredential("monitor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if valid, err := auth.validateTokenScope(token, "", "events:read"); err != nil || !valid {
+		t.Fatalf("event scope = %v, %v", valid, err)
+	}
+	if valid, err := auth.validateTokenScope(token, "", "jobs:submit"); err != nil || valid {
+		t.Fatalf("job scope = %v, %v", valid, err)
+	}
+	ticket, _, err := auth.IssueEventTicket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !auth.ConsumeEventTicket(ticket) || auth.ConsumeEventTicket(ticket) {
+		t.Fatal("event ticket was not exactly one-use")
+	}
+	if _, err := auth.ListTokens(); err != nil {
+		t.Fatalf("event credential metadata: %v", err)
+	}
+}
+
 func TestUnknownOriginAndAdminMutationRejected(t *testing.T) {
 	ts, _, _, _ := newTestServer(t)
-	resp := request(t, http.MethodPost, ts.URL+"/api/v1/jobs", jobBody, map[string]string{"Origin": "https://evil.example"})
+	resp := request(t, http.MethodPost, ts.URL+"/api/v2/jobs", jobBody, map[string]string{"Origin": "https://evil.example"})
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("POS status = %d", resp.StatusCode)
 	}
-	resp = request(t, http.MethodPost, ts.URL+"/api/v1/printers/cashier/disable", "", map[string]string{"Origin": posOrigin})
+	resp = request(t, http.MethodPost, ts.URL+"/api/v2/printers/cashier/disable", "", map[string]string{"Origin": posOrigin})
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("admin status = %d", resp.StatusCode)
 	}
@@ -322,24 +353,24 @@ func TestUnknownOriginAndAdminMutationRejected(t *testing.T) {
 
 func TestQueueAndRunActions(t *testing.T) {
 	ts, _, _, _ := newTestServer(t)
-	resp := request(t, http.MethodPost, ts.URL+"/api/v1/jobs", jobBody, nil)
+	resp := request(t, http.MethodPost, ts.URL+"/api/v2/jobs", jobBody, nil)
 	var job jobs.JobDetail
 	json.NewDecoder(resp.Body).Decode(&job)
 	run := job.OriginalPrinters[0].Runs[0]
-	resp = request(t, http.MethodGet, ts.URL+"/api/v1/printers/cashier/queue", "", nil)
+	resp = request(t, http.MethodGet, ts.URL+"/api/v2/printers/cashier/queue", "", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("queue status = %d", resp.StatusCode)
 	}
-	resp = request(t, http.MethodPost, ts.URL+"/api/v1/print-runs/"+run.UID+"/cancel", "", nil)
+	resp = request(t, http.MethodPost, ts.URL+"/api/v2/print-runs/"+run.UID+"/cancel", "", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("cancel status = %d", resp.StatusCode)
 	}
 	reprintBody := `{"reprintRequestId":"ui-1","printerIds":["cashier"],"reason":"damaged"}`
-	resp = request(t, http.MethodPost, ts.URL+"/api/v1/jobs/"+job.UID+"/reprint", reprintBody, nil)
+	resp = request(t, http.MethodPost, ts.URL+"/api/v2/jobs/"+job.UID+"/reprint", reprintBody, nil)
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("reprint status = %d", resp.StatusCode)
 	}
-	resp = request(t, http.MethodPost, ts.URL+"/api/v1/jobs/"+job.UID+"/reprint", reprintBody, nil)
+	resp = request(t, http.MethodPost, ts.URL+"/api/v2/jobs/"+job.UID+"/reprint", reprintBody, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("duplicate reprint status = %d", resp.StatusCode)
 	}
@@ -364,7 +395,7 @@ func TestSystemLogsAPIBackedFiltersRetentionAndPagination(t *testing.T) {
 	}
 	server := &Server{logs: store}
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/system-logs?levels=warn,error&printerId=kitchen&q=timeout&limit=1", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v2/system-logs?levels=warn,error&printerId=kitchen&q=timeout&limit=1", nil)
 	server.handleSystemLogs(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
@@ -380,7 +411,7 @@ func TestSystemLogsAPIBackedFiltersRetentionAndPagination(t *testing.T) {
 		t.Fatalf("first page = %#v", first)
 	}
 	recorder = httptest.NewRecorder()
-	request = httptest.NewRequest(http.MethodGet, "/api/v1/system-logs?levels=warn,error&printerId=kitchen&q=timeout&limit=1&cursor="+first.NextCursor, nil)
+	request = httptest.NewRequest(http.MethodGet, "/api/v2/system-logs?levels=warn,error&printerId=kitchen&q=timeout&limit=1&cursor="+first.NextCursor, nil)
 	server.handleSystemLogs(recorder, request)
 	var second struct {
 		Logs []appLogging.Record `json:"logs"`
@@ -391,7 +422,7 @@ func TestSystemLogsAPIBackedFiltersRetentionAndPagination(t *testing.T) {
 	}
 }
 
-func TestPrinterLogsAPIFiltersAliasesAndPaginates(t *testing.T) {
+func TestPrinterLogsAPIFiltersCanonicalEventNamesAndPaginates(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "printer-logs.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -411,7 +442,7 @@ func TestPrinterLogsAPIFiltersAliasesAndPaginates(t *testing.T) {
 	}
 	server := &Server{diag: diag}
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/printer-logs?printerId=kitchen&event=print_run_failed&q=timeout&limit=1", nil)
+	request := httptest.NewRequest(http.MethodGet, "/api/v2/printer-logs?printerId=kitchen&event=print_run.failed&q=timeout&limit=1", nil)
 	server.handlePrinterLogs(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())

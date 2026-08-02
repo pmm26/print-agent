@@ -33,7 +33,7 @@ type PayloadValidator func(name string, data json.RawMessage) error
 
 type Service struct {
 	repo      *Repository
-	bus       *events.Bus
+	publisher events.Publisher
 	waker     Waker
 	printers  PrinterDirectory
 	renderer  *escpos.Renderer
@@ -41,12 +41,12 @@ type Service struct {
 	payloads  PayloadValidator
 }
 
-func NewService(repo *Repository, bus *events.Bus, printers PrinterDirectory,
+func NewService(repo *Repository, publisher events.Publisher, printers PrinterDirectory,
 	renderer *escpos.Renderer, templates TemplateValidator) *Service {
 	if renderer == nil {
 		renderer = escpos.NewRenderer()
 	}
-	return &Service{repo: repo, bus: bus, printers: printers, renderer: renderer, templates: templates}
+	return &Service{repo: repo, publisher: publisher, printers: printers, renderer: renderer, templates: templates}
 }
 
 func (s *Service) SetWaker(w Waker)                       { s.waker = w }
@@ -188,7 +188,17 @@ func ExpectedContentHash(renderer *escpos.Renderer, job Job, target JobPrinter, 
 	return renderHash(renderer, job, target, mode, runNumber)
 }
 
-func (s *Service) Accept(req CreateJobRequest) (JobDetail, error) {
+func (s *Service) Accept(req CreateJobRequest) (result JobDetail, resultErr error) {
+	if s.publisher != nil {
+		s.publisher.Publish(events.Event{Type: events.JobReceived, PublishScope: events.ScopeLocal,
+			JobID: req.JobID, Template: req.Template, Message: "best-effort request receipt"})
+		defer func() {
+			if resultErr != nil {
+				s.publisher.Publish(events.Event{Type: events.JobRejected, JobID: req.JobID,
+					Template: req.Template, Error: &events.Error{Code: "job_rejected", Message: "job request was not accepted"}})
+			}
+		}()
+	}
 	if guard, ok := s.printers.(AcceptanceGuard); ok {
 		release := guard.BeginAcceptance()
 		defer release()
@@ -267,8 +277,9 @@ func (s *Service) Accept(req CreateJobRequest) (JobDetail, error) {
 		}
 		targets = append(targets, target)
 		runs = append(runs, PrintRun{UID: runUID, JobUID: uid, PrinterID: printerID,
-			RunNumber: 1, Trigger: TriggerInitial, ContentMode: ContentNormal,
-			ExpectedContentHash: target.AcceptedContentHash, Status: RunQueued, CreatedAt: now})
+			ChainUID: runUID, RunNumber: 1, AttemptNumber: 1, Trigger: TriggerInitial,
+			ContentMode: ContentNormal, ExpectedContentHash: target.AcceptedContentHash,
+			Status: RunQueued, RetryDisposition: RetryNone, CreatedAt: now})
 	}
 	if err := s.repo.InsertJob(job, targets, runs); err != nil {
 		if isUniqueViolation(err) {
@@ -280,7 +291,6 @@ func (s *Service) Accept(req CreateJobRequest) (JobDetail, error) {
 		return JobDetail{}, err
 	}
 	detail := DeriveJob(job, targets, runs)
-	s.bus.Publish(events.Event{Type: events.JobAccepted, Message: job.JobID + " / " + job.UID})
 	for _, run := range runs {
 		s.publishQueued(run)
 	}
@@ -299,11 +309,14 @@ func (s *Service) duplicateResult(existing Job, owner, hash string) (JobDetail, 
 		return JobDetail{}, err
 	}
 	detail.Duplicate = true
+	if s.publisher != nil {
+		s.publisher.Publish(events.Event{Type: events.JobDuplicateRecognized, JobUID: existing.UID,
+			JobID: existing.JobID, Template: existing.Template, CorrelationID: existing.UID})
+	}
 	return detail, nil
 }
 
 func (s *Service) publishQueued(run PrintRun) {
-	s.bus.Publish(events.Event{Type: events.PrintRunQueued, PrinterID: run.PrinterID, RunUID: run.UID})
 	if s.waker != nil {
 		s.waker.Wake(run.PrinterID)
 	}
@@ -404,7 +417,7 @@ func (s *Service) Reprint(jobUID string, req ReprintRequest, owner string) (Repr
 		return s.reprintDuplicate(jobUID, req.RequestID, hash, rec)
 	}
 	if errors.Is(err, ErrStateChanged) || isUniqueViolation(err) {
-		return ReprintResult{}, conflict("active_print_run", "a Print Run is already queued or processing for one of the selected printers")
+		return ReprintResult{}, conflict("active_print_run", "a Print Run is already queued, claimed, or transmitting for one of the selected printers")
 	}
 	if err != nil {
 		return ReprintResult{}, err
@@ -427,27 +440,16 @@ func (s *Service) reprintDuplicate(jobUID, requestID, hash string, rec Deduplica
 }
 
 func (s *Service) ConfirmPrinted(runUID string) error {
-	run, err := s.repo.GetRun(runUID)
-	if err != nil {
-		return err
-	}
 	if err := s.repo.ResolveUncertain(runUID, ResolutionConfirmedPrinted); err != nil {
 		return conflict("invalid_state", "only an unresolved uncertain Print Run can be confirmed")
 	}
-	s.bus.Publish(events.Event{Type: events.PrintRunResolved, PrinterID: run.PrinterID, RunUID: run.UID,
-		Message: "operator confirmed physical output"})
 	return nil
 }
 
 func (s *Service) CancelRun(runUID string) error {
-	run, err := s.repo.GetRun(runUID)
-	if err != nil {
-		return err
-	}
 	if err := s.repo.CancelRun(runUID); err != nil {
 		return conflict("invalid_state", "only a queued Print Run can be cancelled")
 	}
-	s.bus.Publish(events.Event{Type: events.PrintRunCancelled, PrinterID: run.PrinterID, RunUID: run.UID})
 	return nil
 }
 
@@ -464,7 +466,7 @@ func (s *Service) CancelJobTargets(jobUID string, printerIDs []string, reason st
 			return conflict("invalid_state", "an already fulfilled original printer target cannot be cancelled")
 		}
 		if errors.Is(err, ErrStateChanged) {
-			return conflict("active_print_run", "a selected printer is currently processing")
+			return conflict("active_print_run", "a selected printer has a claimed or transmitting Run")
 		}
 		return err
 	}

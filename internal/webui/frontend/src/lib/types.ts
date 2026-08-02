@@ -1,4 +1,4 @@
-export type RunStatus = 'queued' | 'processing' | 'transmitted' | 'failed' | 'uncertain' | 'cancelled'
+export type RunStatus = 'queued' | 'claimed' | 'transmitting' | 'transmitted' | 'failed' | 'uncertain' | 'cancelled'
 export type RunTrigger = 'initial' | 'automatic_retry' | 'manual_reprint'
 export type ConnectionPreference = 'auto' | 'rfcomm' | 'ble'
 
@@ -6,16 +6,20 @@ export interface PrintRun {
   uid: string
   jobUid: string
   printerId: string
+  chainUid: string
   runNumber: number
+  attemptNumber: number
   trigger: RunTrigger
   status: RunStatus
+  retryDisposition: 'none' | 'pending_reconnect' | 'created' | 'exhausted' | 'suppressed'
   retryPending?: boolean
   resolution?: string
   errorCode?: string
   errorMessage?: string
   bytesAccepted: number
   createdAt: string
-  startedAt?: string
+  claimedAt?: string
+  transmissionStartedAt?: string
   finishedAt?: string
   transmittedAt?: string
   reprintRequestId?: string
@@ -73,6 +77,7 @@ export interface PrinterConfig {
 export interface PrinterStatus {
   printer: PrinterConfig
   state: string
+  activity: 'idle' | 'claimed' | 'transmitting'
   endpoint: string
   lastError?: string
   lastTransmission?: string
@@ -92,7 +97,7 @@ export interface AgentStatus {
 
 export interface PrinterQueue {
   printer: PrinterStatus
-  processingRun?: PrintRun
+  activeRun?: PrintRun
   queuedRuns: PrintRun[]
   retryPendingRuns: PrintRun[]
   attentionRuns: PrintRun[]
@@ -144,4 +149,18 @@ export interface SystemLogPage { logs: SystemLogRecord[]; nextCursor: string; re
 export interface PrinterLogPage { events: PrinterLogEvent[]; nextCursor: string; retentionSeconds: number }
 
 export interface PairingCode { code: string; expiresAt: string }
+export interface WebSocketDestinationSettings {
+  id: string; enabled: boolean; endpoint: string; authType: 'none' | 'bearer'; secretRef?: string
+  customCaPath?: string; categories: string[]; connectTimeoutMs: number; heartbeatMs: number
+  staleTimeoutMs: number; writeTimeoutMs: number; reconnectMinMs: number; reconnectMaxMs: number
+  reconnectJitter: number; ackTimeoutMs: number; outboundQueueCapacity: number
+}
+export interface WebSocketSettings {
+  agentId: string; mode: 'disabled' | 'server' | 'client' | 'both'; serverPath: string
+  serverBindAddress: string; allowNonLoopback: boolean; serverAuthRequired: boolean; serverTls: boolean
+  tlsCertPath?: string; tlsKeyRef?: string; clientQueueCapacity: number; connectionLimit: number
+  heartbeatMs: number; writeTimeoutMs: number; maxMessageBytes: number; replayLimit: number
+  eventRetentionSeconds: number; maxUnacknowledgedAgeSeconds: number; deadLetterRetentionSeconds: number
+  eventDiskHighWaterBytes: number; allowedOrigins: string[]; destination?: WebSocketDestinationSettings; restartRequired?: boolean
+}
 export interface APIResult { [key: string]: unknown }

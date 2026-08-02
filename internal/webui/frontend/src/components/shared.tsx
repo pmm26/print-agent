@@ -13,9 +13,9 @@ export function PageHeader({ title, description, actions }: { title: string; des
   </div>
 }
 
-const good = new Set(['connected', 'running', 'completed', 'transmitted', 'fulfilled'])
+const good = new Set(['connected', 'running', 'transmitted', 'confirmed_printed', 'fulfilled'])
 const bad = new Set(['error', 'failed', 'uncertain', 'attention_required', 'unreachable'])
-const waiting = new Set(['connecting', 'reconnecting', 'printing', 'queued', 'processing'])
+const waiting = new Set(['connecting', 'verifying', 'reconnect_wait', 'queued', 'claimed', 'transmitting'])
 
 export function StatusBadge({ value, className }: { value: string; className?: string }) {
   const Icon = good.has(value) ? CheckCircle2 : bad.has(value) ? AlertCircle : waiting.has(value) ? LoaderCircle : value === 'cancelled' || value === 'disabled' ? XCircle : CircleDashed

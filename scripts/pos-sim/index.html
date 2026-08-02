@@ -78,7 +78,7 @@ async function agentFetch(path, opts = {}) {
 
 $("#btn-health").onclick = async () => {
   try {
-    await agentFetch("/api/v1/health");
+    await agentFetch("/api/v2/health");
 		$("#health-result").textContent = "reachable ✓";
 		$("#health-result").className = "ok";
 	} catch (e) {
@@ -89,7 +89,7 @@ $("#btn-health").onclick = async () => {
 
 $("#btn-pair").onclick = async () => {
   try {
-    const res = await agentFetch("/api/v1/pair", {
+    const res = await agentFetch("/api/v2/pair", {
       method: "POST",
       body: JSON.stringify({ code: $("#pair-code").value.trim(), label: "pos-sim " + location.origin }),
     });
@@ -121,7 +121,7 @@ function buildJob(orderNo, printerId) {
 
 async function submit(job) {
   try {
-    const res = await agentFetch("/api/v1/jobs", {
+    const res = await agentFetch("/api/v2/jobs", {
       method: "POST",
       body: JSON.stringify(job),
     });
@@ -139,7 +139,7 @@ $("#btn-print-dup").onclick = () => {
 	submit(lastSubmission.job);
 };
 $("#btn-status").onclick = async () => {
-  try { log("status", await agentFetch("/api/v1/status")); }
+  try { log("status", await agentFetch("/api/v2/status")); }
   catch (e) { log("status failed", e.message, true); }
 };
 </script>

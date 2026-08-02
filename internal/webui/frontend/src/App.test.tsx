@@ -24,7 +24,7 @@ describe('dashboard routes', () => {
   }
 
   it('redirects and hides Pair devices on non-Linux platforms', async () => {
-    server.use(http.get('/api/v1/status', () => HttpResponse.json({ agent: { version: 'test', databaseOk: true }, platform: 'windows', degraded: false, persistence: { paused: false }, printers: [] })))
+    server.use(http.get('/api/v2/status', () => HttpResponse.json({ agent: { version: 'test', databaseOk: true }, platform: 'windows', degraded: false, persistence: { paused: false }, printers: [] })))
     renderApp(<App />, '/setup/pair')
 
     expect(await screen.findByRole('heading', { name: 'Printers' })).toBeInTheDocument()

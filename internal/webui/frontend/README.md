@@ -16,7 +16,7 @@ npm run build
 npm run check
 ```
 
-The development server uses `/admin/` as its base path and proxies `/api/v1`
+The development server uses `/admin/` as its base path and proxies `/api/v2`
 to `http://127.0.0.1:17432`. Start the Go agent separately when exercising
 real printers. Submitting or reprinting a Job can produce physical output.
 
