@@ -28,6 +28,10 @@ const posOrigin = "https://pos.example.com"
 
 type stubDriver struct{ platform.UnimplementedDriver }
 
+type linuxStubDriver struct{ stubDriver }
+
+func (linuxStubDriver) Name() string { return "linux" }
+
 type pairingStubDriver struct {
 	stubDriver
 	result       platform.BluetoothDevice
@@ -201,9 +205,19 @@ func TestDashboardCanonicalRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/admin/setup/printers" {
+		t.Fatalf("non-Linux pairing route = %d %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+
+	linuxServer, _, _, _ := newTestServerWithDriver(t, linuxStubDriver{}, slog.New(slog.DiscardHandler))
+	resp, err = client.Get(linuxServer.URL + "/admin/setup/pair")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("nested dashboard status = %d", resp.StatusCode)
+		t.Fatalf("Linux pairing route status = %d", resp.StatusCode)
 	}
 }
 

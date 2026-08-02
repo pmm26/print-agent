@@ -120,7 +120,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/admin/settings", admin(s.handlePutSettings))
 
 	// Embedded dashboard.
-	mux.Handle("/admin/", http.StripPrefix("/admin", webui.Handler()))
+	dashboard := http.StripPrefix("/admin", webui.Handler())
+	mux.Handle("/admin/setup/pair", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.driver.Name() != "linux" {
+			http.Redirect(w, r, "/admin/setup/printers", http.StatusFound)
+			return
+		}
+		dashboard.ServeHTTP(w, r)
+	}))
+	mux.Handle("/admin/", dashboard)
 	mux.Handle("/admin", http.RedirectHandler("/admin/operations/jobs", http.StatusFound))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {

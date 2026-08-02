@@ -127,6 +127,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"agent":       s.diag.Report(),
+		"platform":    s.driver.Name(),
 		"printers":    statuses,
 		"persistence": s.manager.PersistenceStatus(),
 		"degraded":    err != nil,

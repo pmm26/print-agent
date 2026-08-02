@@ -2,7 +2,7 @@ import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 
 const status = {
-  agent: { version: 'test', databaseOk: true }, degraded: false, persistence: { paused: false },
+  agent: { version: 'test', databaseOk: true }, platform: 'linux', degraded: false, persistence: { paused: false },
   printers: [{ printer: { id: 'kitchen', displayName: 'Kitchen', enabled: true, transport: 'mock', endpoint: 'mock://kitchen', connectionPreference: 'auto', baudRate: 9600, dataBits: 8, stopBits: 1, parity: 'none', charactersPerLine: 32, encoding: 'CP858', autoReconnect: true }, state: 'connected', endpoint: 'mock://kitchen', queueDepth: 0, attentionCount: 0 }],
 }
 

@@ -84,6 +84,7 @@ export interface PrinterStatus {
 
 export interface AgentStatus {
   agent: { version: string; uptimeSeconds?: number; databaseOk?: boolean }
+  platform: string
   printers: PrinterStatus[]
   persistence?: { paused?: boolean; reason?: string }
   degraded?: boolean

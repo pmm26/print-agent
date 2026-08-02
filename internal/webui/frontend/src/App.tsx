@@ -1,7 +1,9 @@
 import { lazy, Suspense, useEffect } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Navigate, Route, Routes, useLocation } from 'react-router'
 import { AppShell } from '@/components/app-shell'
 import { LoadingState } from '@/components/shared'
+import { api, queryKeys } from '@/lib/api'
 
 const JobsPage = lazy(() => import('@/pages/jobs'))
 const PairDevicesPage = lazy(() => import('@/pages/pair-devices'))
@@ -25,11 +27,18 @@ function TitleSync() {
   return null
 }
 
+function LinuxPairRoute() {
+  const status = useQuery({ queryKey: queryKeys.status, queryFn: ({ signal }) => api.status(signal) })
+  if (status.isPending) return <LoadingState rows={4} />
+  if (status.data?.platform !== 'linux') return <Navigate to="/setup/printers" replace />
+  return <PairDevicesPage />
+}
+
 export default function App() {
   return <><TitleSync /><Suspense fallback={<div className="mx-auto max-w-7xl p-6"><LoadingState rows={6} /></div>}><Routes>
     <Route element={<AppShell />}>
       <Route index element={<Navigate to="/operations/jobs" replace />} />
-      <Route path="setup/pair" element={<PairDevicesPage />} />
+      <Route path="setup/pair" element={<LinuxPairRoute />} />
       <Route path="setup/printers" element={<PrintersPage />} />
       <Route path="setup/pos" element={<POSPairingPage />} />
       <Route path="operations/jobs" element={<JobsPage />} />
